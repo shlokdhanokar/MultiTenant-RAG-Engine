@@ -99,12 +99,21 @@ def detect_topic_boundaries(raw_blocks):
     mid = len(all_sizes) // 2
     median_size = (all_sizes[mid - 1] + all_sizes[mid]) / 2 if len(all_sizes) % 2 == 0 else all_sizes[mid]
 
-    # Threshold: noticeably larger than median is a Topic (header)
-    topic_threshold = median_size * 1.15
+    # Thresholds: 
+    # Noticeably larger than median is a Topic (header)
+    # Even larger is a Main Heading
+    sub_threshold = median_size * 1.15
+    main_threshold = median_size * 1.40
 
     tagged_blocks = []
     for block in raw_blocks:
-        block_type = "Topic" if block["font_size"] >= topic_threshold else "Paragraph"
+        if block["font_size"] >= main_threshold:
+            block_type = "Topic" # H1
+        elif block["font_size"] >= sub_threshold:
+            block_type = "Subtopic" # H2
+        else:
+            block_type = "Paragraph"
+            
         block["type"] = block_type
         tagged_blocks.append(block)
 

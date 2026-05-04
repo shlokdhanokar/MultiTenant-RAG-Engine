@@ -2,3 +2,4 @@ PyMuPDF
 pymongo
 Flask
 python-dotenv
+google-generativeai

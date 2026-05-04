@@ -57,11 +57,32 @@ def apply_index_weighting():
     # create a new weighted text index
     index_name = chunks_collection.create_index(
         [("text", TEXT), ("topic_name", TEXT)],
-        weights={"topic_name": 10, "text": 1},
+        weights={"topic_name": 2, "text": 10},
         name="weighted_text_index"
     )
     print(f"created weighted text index: {index_name}")
     return index_name
+
+
+def perform_semantic_retrieval(query, knowledge_base_id, n=4):
+    """
+    Searches the MongoDB collection using $text search for a user query
+    and returns the top "n" most relevant chunks for a specific knowledge base.
+    """
+    chunks_collection = db["chunks"]
+    
+    # Execute $text search with knowledge_base_id filter
+    results = chunks_collection.find(
+        {
+            "$text": {"$search": query},
+            "knowledge_base_id": knowledge_base_id
+        },
+        {
+            "score": {"$meta": "textScore"}
+        }
+    ).sort([("score", {"$meta": "textScore"})]).limit(n)
+    
+    return list(results)
 
 
 if __name__ == "__main__":

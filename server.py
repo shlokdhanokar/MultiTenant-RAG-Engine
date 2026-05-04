@@ -1,11 +1,14 @@
 import os
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, Response
 from pymongo import MongoClient
 from gridfs import GridFS
 from dotenv import load_dotenv
+import bson
 
 from phase1_upload.pdf_parser import analyze_document_layout
 from phase1_upload.chunker import group_content_by_topic, generate_semantic_chunks, map_images_to_chunks
+from database import perform_semantic_retrieval
+from phase2_retrieval.rag_logic import generate_rag_response
 
 # Load environment variables from .env in this folder
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -164,6 +167,108 @@ def upload_pdf():
         "chunks_created": inserted_count,
         "images_extracted": len(uploaded_images),
     }), 201
+
+
+def format_whatsapp_payload(ai_text, chunks, tenant_config, base_url, query=""):
+    """
+    Formats the AI's response into a WhatsApp-style JSON format 
+    (text bubbles, image bubbles, and interactive buttons).
+    """
+    payload = {
+        "reply": [
+            {
+                "type": "text",
+                "content": ai_text
+            }
+        ]
+    }
+    
+    # Score each image by how many query keywords appear in its parent chunk's text
+    # This ensures the scuba image ranks highest for a scuba query, regardless of MongoDB's text score
+    query_words = set(word.lower() for word in query.split() if len(word) > 3)  # skip short words like "is", "at"
+    
+    scored_images = []  # list of (score, image_id)
+    seen = set()
+    for chunk in chunks:
+        chunk_text_lower = chunk.get("text", "").lower()
+        # Count how many query keywords appear in this chunk
+        keyword_hits = sum(1 for w in query_words if w in chunk_text_lower)
+        for img_id in chunk.get("associated_image_ids", []):
+            if img_id not in seen:
+                scored_images.append((keyword_hits, img_id))
+                seen.add(img_id)
+    
+    # Sort by keyword relevance (highest first), take top 2 but ONLY if they have relevance
+    scored_images.sort(key=lambda x: x[0], reverse=True)
+    for score, img_id in scored_images[:2]:
+        if score > 0:  # Only include images with actual keyword relevance
+            payload["reply"].append({
+                "type": "image",
+                "url": f"{base_url}/image/{img_id}"
+            })
+                
+    # Add interactive buttons from the tenant config
+    if tenant_config.get("buttons"):
+        payload["reply"].append({
+            "type": "buttons",
+            "options": tenant_config["buttons"]
+        })
+        
+    return payload
+
+
+@app.route('/image/<image_id>', methods=['GET'])
+def serve_image_endpoint(image_id):
+    """
+    Retrieves the actual image data from MongoDB GridFS 
+    and streams it to the browser.
+    """
+    try:
+        file_obj = fs.get(bson.ObjectId(image_id))
+        return Response(file_obj.read(), mimetype='image/jpeg')
+    except Exception as e:
+        abort(404, description=f"Image not found: {e}")
+
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    """
+    Main Chat endpoint: Retrieval -> AI Generation -> WhatsApp Formatting.
+    """
+    try:
+        data = request.json
+        if not data or 'query' not in data or 'knowledge_base_id' not in data:
+            abort(400, description="Missing 'query' or 'knowledge_base_id'")
+            
+        query = data['query']
+        kb_id = data['knowledge_base_id']
+        
+        # 1. perform_semantic_retrieval()
+        chunks = perform_semantic_retrieval(query, kb_id, n=4)
+        
+        # DEBUG LOGS
+        print(f"\n--- DEBUG: Retrived {len(chunks)} chunks for query: '{query}' ---")
+        for i, c in enumerate(chunks):
+            print(f"[{i}] Topic: {c['topic_name']} | Score: {c.get('score')}")
+        
+        if not chunks:
+            return jsonify({
+                "reply": [{"type": "text", "content": "I'm sorry, I couldn't find any information about that in the knowledge base."}]
+            })
+        
+        # 2. generate_rag_response()
+        ai_text, tenant_config = generate_rag_response(query, chunks, kb_id)
+        
+        # 3. format_whatsapp_payload()
+        base_url = request.host_url.rstrip('/')
+        response_payload = format_whatsapp_payload(ai_text, chunks, tenant_config, base_url, query)
+        
+        return jsonify(response_payload)
+    except Exception as e:
+        print(f"CHAT ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 if __name__ == "__main__":
