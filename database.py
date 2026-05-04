@@ -36,13 +36,13 @@ def create_fulltext_index():
 
 def apply_index_weighting():
     """
-    Assign specific weights to the text index: give the topic_name field
-    a higher weight than the body text field to ensure that searches hitting
-    the header title rank higher than passing mentions in the body.
+    Assign specific weights to the text index: give the body text field
+    a higher weight than the topic name to ensure that specific keywords
+    (like 'scuba') drive the retrieval ranking.
 
     Weights:
-        topic_name: 10 (highest priority)
-        text: 1 (standard body text)
+        text: 10 (highest priority for keyword matching)
+        topic_name: 2 (secondary priority for context)
     """
     chunks_collection = db["chunks"]
 
