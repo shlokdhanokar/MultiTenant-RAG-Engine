@@ -157,14 +157,19 @@ def construct_chunk_metadata(chunk, source_file, source_file_id, knowledge_base_
 def format_mongodb_documents(chunks, source_file, source_file_id, knowledge_base_id, language="en"):
     """
     Format the semantically chunked text and their associated metadata
-    (including the newly generated GridFS image_ids) into BSON-compatible
-    JSON objects ready for insert_many().
+    (including the newly generated GridFS image_ids and vector embeddings)
+    into BSON-compatible JSON objects ready for insert_many().
     """
     docs = []
     for chunk in chunks:
+        # Generate semantic vector for the chunk text
+        print(f"  [EMBED] Generating vector for chunk {chunk['chunk_index']}...")
+        embedding = generate_text_embedding(chunk["text"])
+        
         doc = construct_chunk_metadata(
             chunk, source_file, source_file_id, knowledge_base_id, language
         )
+        doc["embedding"] = embedding
         docs.append(doc)
     return docs
 
@@ -301,11 +306,14 @@ def chat():
         query = data['query']
         kb_id = data['knowledge_base_id']
         
+        # Embed the query to use for vector search (both text and images)
+        query_embedding = generate_text_embedding(query)
+        
         # 1. perform_semantic_retrieval() for Text Context
-        chunks = perform_semantic_retrieval(query, kb_id, n=4)
+        chunks = perform_semantic_retrieval(query_embedding, kb_id, n=4)
         
         # DEBUG LOGS
-        print(f"\n--- DEBUG: Retrieved {len(chunks)} chunks for query: '{query}' ---")
+        print(f"\n--- DEBUG: Retrieved {len(chunks)} chunks for query: {ascii(query)} ---")
         for i, c in enumerate(chunks):
             print(f"[{i}] Topic: {c['topic_name']} | Score: {c.get('score')}")
         
@@ -315,8 +323,7 @@ def chat():
             })
             
         # 2. Vector Search for Images
-        # Convert user query to embedding for retrieval
-        query_embedding = generate_text_embedding(query)
+        # Search for top 2 closest image captions using the same query embedding
         # Search for top 2 closest image captions
         image_results = perform_image_vector_search(query_embedding, kb_id, limit=2)
         

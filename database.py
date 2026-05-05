@@ -27,62 +27,53 @@ def get_gridfs():
 
 def create_fulltext_index():
     """
-    Configure $text indexing by executing create_index([("text", TEXT)])
-    on the chunks collection. This delegates to apply_index_weighting()
-    which creates the index with proper field weights.
+    Deprecated: We now use Vector Search instead of $text search.
     """
-    return apply_index_weighting()
-
+    pass
 
 def apply_index_weighting():
     """
-    Assign specific weights to the text index: give the body text field
-    a higher weight than the topic name to ensure that specific keywords
-    (like 'scuba') drive the retrieval ranking.
-
-    Weights:
-        text: 10 (highest priority for keyword matching)
-        topic_name: 2 (secondary priority for context)
+    Deprecated: We now use Vector Search instead of $text search.
     """
-    chunks_collection = db["chunks"]
-
-    # drop any existing text index first to avoid conflicts
-    existing_indexes = chunks_collection.index_information()
-    for index_name, index_info in existing_indexes.items():
-        # check if this is a text index
-        if any(v == "text" for _, v in index_info.get("key", [])):
-            chunks_collection.drop_index(index_name)
-            print(f"dropped existing text index: {index_name}")
-
-    # create a new weighted text index
-    index_name = chunks_collection.create_index(
-        [("text", TEXT), ("topic_name", TEXT)],
-        weights={"topic_name": 2, "text": 10},
-        name="weighted_text_index"
-    )
-    print(f"created weighted text index: {index_name}")
-    return index_name
+    pass
 
 
-def perform_semantic_retrieval(query, knowledge_base_id, n=4):
+def perform_semantic_retrieval(query_embedding, knowledge_base_id, n=4):
     """
-    Searches the MongoDB collection using $text search for a user query
+    Searches the MongoDB collection using $vectorSearch for a user query embedding
     and returns the top "n" most relevant chunks for a specific knowledge base.
+    Requires an Atlas Vector Search Index on the 'chunks' collection.
     """
     chunks_collection = db["chunks"]
     
-    # Execute $text search with knowledge_base_id filter
-    results = chunks_collection.find(
+    pipeline = [
         {
-            "$text": {"$search": query},
-            "knowledge_base_id": knowledge_base_id
+            "$vectorSearch": {
+                "index": "vector_index", # Assumed name for the text vector index
+                "path": "embedding",
+                "queryVector": query_embedding,
+                "numCandidates": n * 10,
+                "limit": n,
+                "filter": {
+                    "knowledge_base_id": knowledge_base_id
+                }
+            }
         },
         {
-            "score": {"$meta": "textScore"}
+            "$project": {
+                "_id": 0,
+                "embedding": 0, # Exclude embedding to save bandwidth
+                "score": { "$meta": "vectorSearchScore" }
+            }
         }
-    ).sort([("score", {"$meta": "textScore"})]).limit(n)
+    ]
     
-    return list(results)
+    try:
+        results = list(chunks_collection.aggregate(pipeline))
+        return results
+    except Exception as e:
+        print(f"Text vector search failed (make sure the Atlas Vector Search Index is created): {e}")
+        return []
 
 
 def store_image_caption_and_vector(gridfs_id, caption, embedding, kb_id, source):

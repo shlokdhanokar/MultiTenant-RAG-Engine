@@ -66,6 +66,10 @@ def generate_rag_response(query, chunks, kb_id):
     GUARDRAILS:
     {config['guardrails']}
     
+    CRITICAL LANGUAGE INSTRUCTION:
+    1. Detect the language of the USER QUERY.
+    2. You MUST generate your entire response in that EXACT SAME language. For example, if the query is in Hindi, you must respond in Hindi.
+    
     CONTEXT FROM KNOWLEDGE BASE:
     {context_text}
     

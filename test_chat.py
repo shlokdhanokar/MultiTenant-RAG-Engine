@@ -3,7 +3,7 @@ import json
 
 url = "http://localhost:8000/chat"
 payload = {
-    "query": "information about scuba diving?",
+    "query": "स्कूबा डाइविंग के बारे में जानकारी?",
     "knowledge_base_id": "tourism"
 }
 headers = {"Content-Type": "application/json"}
