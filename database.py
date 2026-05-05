@@ -85,6 +85,59 @@ def perform_semantic_retrieval(query, knowledge_base_id, n=4):
     return list(results)
 
 
+def store_image_caption_and_vector(gridfs_id, caption, embedding, kb_id, source):
+    """
+    Store the generated image caption and its vector embedding in the MongoDB collection.
+    """
+    collection = db["image_captions"]
+    doc = {
+        "gridfs_id": gridfs_id,
+        "caption": caption,
+        "embedding": embedding,
+        "knowledge_base_id": kb_id,
+        "source_file": source
+    }
+    collection.insert_one(doc)
+
+
+def perform_image_vector_search(query_embedding, knowledge_base_id, limit=2):
+    """
+    Perform a vector search on the image_captions collection using the query embedding.
+    Requires an Atlas Vector Search Index to be created on the 'embedding' field.
+    """
+    collection = db["image_captions"]
+    
+    pipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index", # Note: the user must name their index "vector_index" or default
+                "path": "embedding",
+                "queryVector": query_embedding,
+                "numCandidates": limit * 10,
+                "limit": limit,
+                "filter": {
+                    "knowledge_base_id": knowledge_base_id
+                }
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "gridfs_id": 1,
+                "caption": 1,
+                "score": { "$meta": "vectorSearchScore" }
+            }
+        }
+    ]
+    
+    try:
+        results = list(collection.aggregate(pipeline))
+        return results
+    except Exception as e:
+        print(f"Vector search failed (make sure the Atlas Vector Search Index is created): {e}")
+        return []
+
+
 if __name__ == "__main__":
     # simple test to check connection and create indexes
     try:

@@ -1,14 +1,17 @@
 import os
+import io
+import time
 from flask import Flask, request, jsonify, abort, Response
 from pymongo import MongoClient
 from gridfs import GridFS
 from dotenv import load_dotenv
 import bson
+import google.generativeai as genai
+from PIL import Image
 
 from phase1_upload.pdf_parser import analyze_document_layout
 from phase1_upload.chunker import group_content_by_topic, generate_semantic_chunks, map_images_to_chunks
-from database import perform_semantic_retrieval
-from phase2_retrieval.rag_logic import generate_rag_response
+from database import perform_semantic_retrieval, store_image_caption_and_vector, perform_image_vector_search
 
 # Load environment variables from .env in this folder
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -16,6 +19,9 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
     raise RuntimeError("MONGODB_URI not set in .env")
+
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
 
 # MongoDB connection and GridFS bucket
 client = MongoClient(MONGODB_URI)
@@ -36,24 +42,93 @@ fs = init_gridfs_bucket()
 app = Flask(__name__)
 
 
-def upload_images_to_gridfs(images, source_filename, fs):
+def generate_image_caption(image_bytes, image_ext="jpeg"):
+    """
+    Send raw image bytes directly to Gemini Vision (bypassing PIL)
+    and get a descriptive caption.
+    """
+    try:
+        # Map common extensions to MIME types
+        ext_to_mime = {
+            "jpeg": "image/jpeg", "jpg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp",
+            "gif": "image/gif", "bmp": "image/bmp",
+        }
+        mime_type = ext_to_mime.get(image_ext.lower(), "image/jpeg")
+        
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        response = model.generate_content([
+            "Describe this image in 1-2 concise sentences. Focus on the main subject and activity shown.",
+            {"mime_type": mime_type, "data": image_bytes}
+        ])
+        return response.text.strip()
+    except Exception as e:
+        print(f"Caption generation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return "Image content not available"
+
+
+def generate_text_embedding(text):
+    """
+    Convert text into a 768-dimensional vector using Gemini Embeddings.
+    """
+    try:
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type="retrieval_document"
+        )
+        return result['embedding']
+    except Exception as e:
+        print(f"Embedding generation failed: {e}")
+        return [0.0] * 768  # Fallback zero vector
+
+
+def upload_images_to_gridfs(images, source_filename, fs, knowledge_base_id=""):
     """
     Iterate through the extracted images, upload the raw byte streams to GridFS,
-    and capture the generated ObjectId for each successful upload.
-
-    Returns:
-        A list of dicts: [{page_number, gridfs_id}, ...]
+    generate AI captions and embeddings, and store them in MongoDB.
+    Includes rate-limit safety pauses.
     """
     uploaded = []
-    for img in images:
+    for i, img in enumerate(images):
+        if i > 0:
+            print(f"  [Rate Limit Safety] Pausing for 2 seconds before image {i+1}...")
+            time.sleep(2)
+
         img_filename = f"{source_filename}_page{img['page_number']}.{img['image_ext']}"
         gridfs_id = fs.put(
             img["image_bytes"],
             filename=img_filename,
         )
+        gridfs_id_str = str(gridfs_id)
+
+        # Generate AI caption with simple retry logic
+        caption = "Image content not available"
+        for attempt in range(2):
+            try:
+                caption = generate_image_caption(img["image_bytes"], img.get("image_ext", "jpeg"))
+                if caption != "Image content not available":
+                    break
+            except Exception as e:
+                if "429" in str(e) and attempt == 0:
+                    print("  [Rate Limit] Hit limit, retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    break
+        
+        print(f"  [Caption] {img_filename}: {caption}")
+        
+        # Generate Vector Embedding for the caption
+        embedding = generate_text_embedding(caption)
+        
+        # Store in MongoDB image_captions collection
+        store_image_caption_and_vector(gridfs_id_str, caption, embedding, knowledge_base_id, source_filename)
+
         uploaded.append({
             "page_number": img["page_number"],
-            "gridfs_id": str(gridfs_id),
+            "gridfs_id": gridfs_id_str,
             "bbox": img.get("bbox")
         })
     return uploaded
@@ -146,7 +221,7 @@ def upload_pdf():
     chunks = generate_semantic_chunks(topic_groups)
 
     # ---- Step 5: upload_images_to_gridfs() ----
-    uploaded_images = upload_images_to_gridfs(layout["images"], file.filename, fs)
+    uploaded_images = upload_images_to_gridfs(layout["images"], file.filename, fs, knowledge_base_id)
 
     # ---- Step 6: map_images_to_chunks() ----
     chunks = map_images_to_chunks(chunks, uploaded_images)
@@ -169,7 +244,7 @@ def upload_pdf():
     }), 201
 
 
-def format_whatsapp_payload(ai_text, chunks, tenant_config, base_url, query=""):
+def format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url):
     """
     Formats the AI's response into a WhatsApp-style JSON format 
     (text bubbles, image bubbles, and interactive buttons).
@@ -183,29 +258,12 @@ def format_whatsapp_payload(ai_text, chunks, tenant_config, base_url, query=""):
         ]
     }
     
-    # Score each image by how many query keywords appear in its parent chunk's text
-    # This ensures the scuba image ranks highest for a scuba query, regardless of MongoDB's text score
-    query_words = set(word.lower() for word in query.split() if len(word) > 3)  # skip short words like "is", "at"
-    
-    scored_images = []  # list of (score, image_id)
-    seen = set()
-    for chunk in chunks:
-        chunk_text_lower = chunk.get("text", "").lower()
-        # Count how many query keywords appear in this chunk
-        keyword_hits = sum(1 for w in query_words if w in chunk_text_lower)
-        for img_id in chunk.get("associated_image_ids", []):
-            if img_id not in seen:
-                scored_images.append((keyword_hits, img_id))
-                seen.add(img_id)
-    
-    # Sort by keyword relevance (highest first), take top 2 but ONLY if they have relevance
-    scored_images.sort(key=lambda x: x[0], reverse=True)
-    for score, img_id in scored_images[:2]:
-        if score > 0:  # Only include images with actual keyword relevance
-            payload["reply"].append({
-                "type": "image",
-                "url": f"{base_url}/image/{img_id}"
-            })
+    # Add images identified via Vector Search
+    for img_id in selected_image_ids:
+        payload["reply"].append({
+            "type": "image",
+            "url": f"{base_url}/image/{img_id}"
+        })
                 
     # Add interactive buttons from the tenant config
     if tenant_config.get("buttons"):
@@ -243,11 +301,11 @@ def chat():
         query = data['query']
         kb_id = data['knowledge_base_id']
         
-        # 1. perform_semantic_retrieval()
+        # 1. perform_semantic_retrieval() for Text Context
         chunks = perform_semantic_retrieval(query, kb_id, n=4)
         
         # DEBUG LOGS
-        print(f"\n--- DEBUG: Retrived {len(chunks)} chunks for query: '{query}' ---")
+        print(f"\n--- DEBUG: Retrieved {len(chunks)} chunks for query: '{query}' ---")
         for i, c in enumerate(chunks):
             print(f"[{i}] Topic: {c['topic_name']} | Score: {c.get('score')}")
         
@@ -255,13 +313,29 @@ def chat():
             return jsonify({
                 "reply": [{"type": "text", "content": "I'm sorry, I couldn't find any information about that in the knowledge base."}]
             })
+            
+        # 2. Vector Search for Images
+        # Convert user query to embedding for retrieval
+        query_embedding = generate_text_embedding(query)
+        # Search for top 2 closest image captions
+        image_results = perform_image_vector_search(query_embedding, kb_id, limit=2)
         
-        # 2. generate_rag_response()
+        selected_image_ids = []
+        for img_doc in image_results:
+            # Only include images with a reasonable similarity score to avoid random matches
+            score = img_doc.get("score", 0)
+            print(f"  [Vector Search] Found image {img_doc['gridfs_id']} with score: {score:.3f} | Caption: {img_doc['caption']}")
+            if score > 0.65:
+                selected_image_ids.append(img_doc['gridfs_id'])
+        
+        # 3. generate_rag_response() for text answer
+        # Note: We pass the chunks for context as usual
+        from phase2_retrieval.rag_logic import generate_rag_response
         ai_text, tenant_config = generate_rag_response(query, chunks, kb_id)
         
-        # 3. format_whatsapp_payload()
+        # 4. format_whatsapp_payload()
         base_url = request.host_url.rstrip('/')
-        response_payload = format_whatsapp_payload(ai_text, chunks, tenant_config, base_url, query)
+        response_payload = format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url)
         
         return jsonify(response_payload)
     except Exception as e:
