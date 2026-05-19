@@ -530,10 +530,10 @@ def core_chat_logic(data, admin, project_id):
             return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id
 
         elif current_step == "awaiting_otp":
-            # Future: The user's message IS the OTP code
-            # from phase4_integrations.marketplace_auth import verify_otp_and_authenticate
-            # result = verify_otp_and_authenticate(query.strip(), session_id, marketplace_state)
-            ai_text = "OTP verification is coming soon! 🚧"
+            # The user's message IS the OTP code
+            from phase4_integrations.marketplace_auth import verify_otp_and_authenticate
+            result = verify_otp_and_authenticate(query.strip(), session_id, marketplace_state)
+            ai_text = result["message"]
             tenant_config = project_config
 
             save_chat_message(session_id, "user", query)
@@ -603,10 +603,7 @@ def core_chat_logic(data, admin, project_id):
     from phase2_retrieval.rag_logic import generate_text_embedding
     from database import perform_semantic_retrieval
     query_embedding = generate_text_embedding(search_query)
-    
-    print(f"  [DEBUG] Calling perform_semantic_retrieval with kb_id: {kb_id}")
     chunks = perform_semantic_retrieval(query_embedding, kb_id, n=4)
-    print(f"  [DEBUG] perform_semantic_retrieval returned {len(chunks)} chunks")
     
     if not chunks:
         return "I'm sorry, I couldn't find any information.", [], project_config, "", session_id, is_expired, project_id
