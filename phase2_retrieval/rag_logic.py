@@ -124,6 +124,13 @@ USER QUERY:
     print(f"  [TOKENS] RAG Response | Model: gpt-4o-mini")
     print(f"           Input: {usage.prompt_tokens} | Output: {usage.completion_tokens} | Total: {usage.total_tokens}")
     print(f"           Cost: ${total_cost:.6f}")
+
+    # Log to CSV automatically
+    try:
+        from token_logger import log_openai_expenditure
+        log_openai_expenditure("RAG Response", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+    except Exception as e:
+        print(f"Failed to log RAG tokens to CSV: {e}")
     
     return ai_text, project_config, token_info
 
@@ -137,6 +144,13 @@ def generate_text_embedding(text):
             model="text-embedding-3-small",
             input=text,
         )
+        try:
+            usage = response.usage
+            from token_logger import log_openai_expenditure
+            log_openai_expenditure("Text Embedding", "text-embedding-3-small", usage.prompt_tokens, 0, usage.total_tokens)
+        except Exception as log_err:
+            print(f"Failed to log embedding tokens: {log_err}")
+            
         return response.data[0].embedding
     except Exception as e:
         print(f"Embedding generation failed: {e}")

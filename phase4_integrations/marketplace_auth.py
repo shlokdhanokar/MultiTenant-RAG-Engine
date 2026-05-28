@@ -1,8 +1,8 @@
 """
-Phase 5 - Step B: Marketplace Authentication (OTP → JWT)
+Phase 5 - Step B: Marketplace Authentication (Email OTP → JWT)
 Handles the OTP-based login flow where:
-  1. User provides phone number
-  2. We call the marketplace to send an OTP via SMS
+  1. User provides email address
+  2. We call the marketplace to send an OTP via email
   3. User types the OTP back in chat
   4. We verify it and store the JWT token in the session
 
@@ -59,24 +59,24 @@ def get_marketplace_token(session):
     }
 
 
-def initiate_otp_login(phone, session_id):
+def initiate_otp_login(email, session_id):
     """
-    Fires a POST to /user/auth/generate-login-otp to send an OTP SMS
-    to the user's phone number.
+    Fires a POST to /user/auth/generate-login-otp to send an OTP
+    to the user's email address.
 
     Args:
-        phone: The user's phone number (e.g., "+917048809875" or "7048809875")
+        email: The user's email address (e.g., "user@example.com")
         session_id: Current chat session ID to update state
 
     Returns:
         dict with "success", "message", and optionally "state"
     """
-    # Normalize phone number
-    phone = phone.strip()
-    if not phone:
+    # Normalize email
+    email = email.strip().lower()
+    if not email or "@" not in email:
         return {
             "success": False,
-            "message": "I didn't catch your phone number. Could you please share it again?",
+            "message": "That doesn't look like a valid email address. Could you please share it again?",
         }
 
     # Build the request
@@ -87,9 +87,11 @@ def initiate_otp_login(phone, session_id):
             "message": "Sorry, the marketplace service is not configured yet.",
         }
 
-    payload = {"phone": phone}
+    config = load_marketplace_config()
+    domain_id = config.get("domain_id", "")
+    payload = {"identifier": email, "domainId": domain_id}
 
-    print(f"  [MARKETPLACE] Sending OTP to {phone}")
+    print(f"  [MARKETPLACE] Sending OTP to {email}")
     print(f"  [MARKETPLACE] Endpoint: {endpoint}")
 
     try:
@@ -106,28 +108,28 @@ def initiate_otp_login(phone, session_id):
             # OTP sent successfully — update session state
             update_marketplace_state(session_id, {
                 "current_step": "awaiting_otp",
-                "phone": phone,
+                "email": email,
             })
 
             return {
                 "success": True,
                 "message": (
-                    f"I've sent a verification code (OTP) to *{phone}*. "
-                    f"Please type the code here to continue shopping."
+                    f"I've sent a verification code (OTP) to *{email}*. "
+                    f"Please check your inbox and type the code here to continue shopping."
                 ),
             }
         else:
             # API returned an error
             try:
                 error_data = resp.json()
-                error_msg = error_data.get("message", resp.text[:200])
+                error_msg = error_data.get("message", error_data.get("error", resp.text[:200]))
             except Exception:
                 error_msg = resp.text[:200]
 
             print(f"  [MARKETPLACE] OTP Error: {error_msg}")
             return {
                 "success": False,
-                "message": f"Sorry, I couldn't send the OTP. The marketplace said: {error_msg}",
+                "message": f"Sorry, I couldn't send the OTP. The marketplace said: *{error_msg}*",
             }
 
     except requests.RequestException as e:
@@ -155,18 +157,18 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
     Returns:
         dict with "success" and "message"
     """
-    phone = marketplace_state.get("phone", "")
-    if not phone:
+    email = marketplace_state.get("email", "")
+    if not email:
         return {
             "success": False,
-            "message": "Something went wrong — I lost your phone number. Please start the login again by sharing your phone number.",
+            "message": "Something went wrong — I lost your email address. Please start the login again by sharing your email.",
         }
 
     otp = otp.strip()
     if not otp:
         return {
             "success": False,
-            "message": "I didn't catch the OTP. Please type the verification code you received via SMS.",
+            "message": "I didn't catch the OTP. Please type the verification code you received via email.",
         }
 
     # Build the request to verify-login-otp
@@ -177,12 +179,15 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
             "message": "Sorry, the marketplace service is not configured yet.",
         }
 
+    config = load_marketplace_config()
+    domain_id = config.get("domain_id", "")
     payload = {
-        "phone": phone,
+        "identifier": email,
+        "domainId": domain_id,
         "otp": otp,
     }
 
-    print(f"  [MARKETPLACE] Verifying OTP for {phone}")
+    print(f"  [MARKETPLACE] Verifying OTP for {email}")
     print(f"  [MARKETPLACE] Endpoint: {endpoint}")
 
     try:
@@ -224,6 +229,9 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                 or resp_data.get("data", {}).get("customerId")
                 or resp_data.get("userId")
                 or resp_data.get("data", {}).get("userId")
+                or resp_data.get("data", {}).get("user", {}).get("id")
+                or resp_data.get("data", {}).get("customer", {}).get("id")
+                or email  # Robust fallback to email if no ID is found in the response
             )
 
             # Store encrypted token + auth flag in the session document
@@ -235,7 +243,7 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                         "marketplaceAuth": {
                             "isAuthenticated": True,
                             "token": encrypted_token,
-                            "phone": phone,
+                            "email": email,
                             "customerId": customer_id,
                             "authenticatedAt": datetime.now(timezone.utc),
                         },
@@ -247,10 +255,10 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
             # Reset the marketplace flow state to idle
             update_marketplace_state(session_id, {
                 "current_step": "idle",
-                "phone": None,
+                "email": None,
             })
 
-            print(f"  [MARKETPLACE] Authentication successful for {phone}")
+            print(f"  [MARKETPLACE] Authentication successful for {email}")
 
             # Fetch and cache user profile in the background
             # Re-read the session to get the freshly stored token
@@ -287,7 +295,7 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
             # API returned an error (wrong OTP, expired, etc.)
             try:
                 error_data = resp.json()
-                error_msg = error_data.get("message", resp.text[:200])
+                error_msg = error_data.get("message", error_data.get("error", resp.text[:200]))
             except Exception:
                 error_msg = resp.text[:200]
 
@@ -295,8 +303,8 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
             return {
                 "success": False,
                 "message": (
-                    f"The OTP verification failed: {error_msg}\n\n"
-                    "Please try again or type your phone number to request a new code."
+                    f"The OTP verification failed: *{error_msg}*\n\n"
+                    "Please try again or type your email address to request a new code."
                 ),
             }
 
@@ -425,21 +433,21 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
 
     # ── Auth actions (no login required) ──
     if action_id == "send_otp":
-        phone = parameters.get("phone", "")
-        return initiate_otp_login(phone, session_id)
+        email = parameters.get("email", "")
+        return initiate_otp_login(email, session_id)
 
     elif action_id == "verify_otp":
-        phone = parameters.get("phone", "")
+        email = parameters.get("email", "")
         otp = parameters.get("otp", "")
         # Build a minimal marketplace_state for the verify function
-        state = {"phone": phone}
+        state = {"email": email}
         return verify_otp_and_authenticate(otp, session_id, state)
 
     # ── All other actions require authentication ──
     if not check_marketplace_auth(session):
         # User isn't logged in — start the auth flow
         update_marketplace_state(session_id, {
-            "current_step": "awaiting_phone",
+            "current_step": "awaiting_email",
             "pending_action": action_id,
             "pending_parameters": parameters,
         })
@@ -447,12 +455,449 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
             "success": False,
             "message": (
                 "To help you with shopping, I need to verify your identity first.\n\n"
-                "Please share your *phone number* to get started."
+                "Please share your *email address* to get started."
             ),
         }
 
-    # ── Authenticated actions (future implementations) ──
-    return {
+    # ── Authenticated actions ──
+    # User is logged in. Grab their headers (with the decrypted token)
+    success, headers = get_marketplace_token(session)
+    if not success:
+        return {
+            "success": False,
+            "message": "Sorry, your login session expired or is invalid. Please log in again.",
+        }
+
+    # Execute the actual marketplace action
+    config = load_marketplace_config()
+    
+    # We must format the parameters properly and merge the action schema
+    from phase4_integrations.registry import get_service
+    service_def = get_service("marketplace")
+    action_schema = next((a for a in service_def["availableActions"] if a["actionId"] == action_id), None)
+    
+    if not action_schema:
+        return {
+            "success": False,
+            "message": f"Could not find the definition for marketplace action '{action_id}'.",
+        }
+
+    # Merge implicit parameters (like customerId, storeId) that the LLM doesn't provide
+    if "storeId" in action_schema.get("parameters", []) and action_id not in ("view_cart",):
+        parameters["storeId"] = config.get("default_store_id")
+    if "currencyId" in action_schema.get("parameters", []):
+        parameters["currencyId"] = config.get("default_currency_id")
+        
+    # If the action requires customerId, get it from the session
+    if "customerId" in action_schema.get("parameters", []):
+        session_cust_id = session.get("marketplaceAuth", {}).get("customerId")
+        if not session_cust_id:
+            session_cust_id = session.get("marketplaceAuth", {}).get("email")
+        parameters["customerId"] = session_cust_id
+
+    # Resolve product index to actual productId for get_product_details
+    if action_id == "get_product_details":
+        prod_id_param = parameters.get("productId", "")
+        is_index = False
+        try:
+            # Check if it's a numeric index
+            idx = int(str(prod_id_param).strip())
+            is_index = True
+        except ValueError:
+            pass
+
+        if is_index:
+            marketplace_state = session.get("marketplaceState", {})
+            last_products = marketplace_state.get("last_products_shown", [])
+            if last_products and 0 < idx <= len(last_products):
+                resolved_id = last_products[idx - 1].get("productId")
+                if resolved_id:
+                    parameters["productId"] = resolved_id
+                    print(f"  [MARKETPLACE] Resolved index {idx} to productId {resolved_id} from cache")
+
+    # ── Cart: add_to_cart interception ──
+    # The LLM provides productId and quantity, but the marketplace API
+    # also requires productVarientUomId, customerPhone, and storeId.
+    if action_id == "add_to_cart":
+        marketplace_state = session.get("marketplaceState", {})
+        last_products = marketplace_state.get("last_products_shown", [])
+        auth_data = session.get("marketplaceAuth", {})
+
+        print(f"  [MARKETPLACE] Cart DEBUG: last_products count = {len(last_products)}")
+        print(f"  [MARKETPLACE] Cart DEBUG: LLM productId = '{parameters.get('productId')}'")
+        print(f"  [MARKETPLACE] Cart DEBUG: LLM productVarientUomId = '{parameters.get('productVarientUomId')}'")
+
+        # Inject customerPhone from session auth or session userId
+        if not parameters.get("customerPhone"):
+            phone = auth_data.get("phone") or auth_data.get("userProfile", {}).get("phone") or session.get("userId", "")
+            parameters["customerPhone"] = phone
+
+        # Resolve productId from cache
+        prod_id_param = str(parameters.get("productId", "")).strip()
+        resolved_product = None
+        
+        if len(prod_id_param) <= 2 and prod_id_param.isdigit():
+            # It's an index like "1" or "2"
+            idx = int(prod_id_param)
+            if last_products and 0 < idx <= len(last_products):
+                resolved_product = last_products[idx - 1]
+                parameters["productId"] = resolved_product["productId"]
+                print(f"  [MARKETPLACE] Cart: Resolved index {idx} to productId {resolved_product['productId']}")
+            else:
+                print(f"  [MARKETPLACE] Cart DEBUG: Index {idx} out of range (have {len(last_products)} products)")
+        else:
+            # It might be a UUID or a product name
+            if last_products:
+                # First try exact UUID match
+                resolved_product = next((p for p in last_products if str(p.get("productId")).lower() == prod_id_param.lower()), None)
+                if resolved_product:
+                    parameters["productId"] = resolved_product["productId"]
+                    print(f"  [MARKETPLACE] Cart: Matched UUID {prod_id_param} to cached product {resolved_product.get('name')}")
+                else:
+                    # Fallback to name match
+                    for p in last_products:
+                        if p.get("name", "").lower() in prod_id_param.lower() or prod_id_param.lower() in p.get("name", "").lower():
+                            resolved_product = p
+                            parameters["productId"] = p["productId"]
+                            print(f"  [MARKETPLACE] Cart: Resolved name '{prod_id_param}' to productId {p['productId']}")
+                            break
+            else:
+                print(f"  [MARKETPLACE] Cart DEBUG: No cached products to search!")
+
+        print(f"  [MARKETPLACE] Cart DEBUG: resolved_product = {resolved_product}")
+
+        # Clean up invalid 'undefined' or 'null' generated by the LLM
+        p_uom_id = parameters.get("productVarientUomId")
+        if isinstance(p_uom_id, str) and p_uom_id.lower() in ("undefined", "null", "none", ""):
+            parameters.pop("productVarientUomId", None)
+
+        # Inject productVarientUomId from cache if not provided
+        if not parameters.get("productVarientUomId"):
+            cached_uom_id = resolved_product.get("productVarientUomId") if resolved_product else None
+            print(f"  [MARKETPLACE] Cart DEBUG: cached_uom_id = {cached_uom_id}")
+            if cached_uom_id:
+                parameters["productVarientUomId"] = cached_uom_id
+                print(f"  [MARKETPLACE] Cart: Injected cached productVarientUomId {cached_uom_id}")
+            else:
+                # Fallback: search the product by name using listv4
+                resolved_pid = parameters.get("productId", "")
+                prod_name = resolved_product.get("name", "") if resolved_product else ""
+                print(f"  [MARKETPLACE] Cart: No cached variant ID for {resolved_pid} ({prod_name}), fetching via listv4...")
+                try:
+                    search_url = f"{config.get('base_url', '').rstrip('/')}/user/product/listv4"
+                    search_payload = {
+                        "storeId": config.get("default_store_id"),
+                        "searchKey": prod_name,
+                        "limit": 10
+                    }
+                    search_resp = requests.post(search_url, headers=headers, json=search_payload, timeout=10)
+                    if search_resp.status_code < 300:
+                        search_data = search_resp.json().get("data", {})
+                        rows = search_data.get("rows", [])
+                        
+                        # Find the matching product in the results
+                        matched = next((r for r in rows if (r.get("id") or r.get("uuid") or r.get("productId")) == resolved_pid), None)
+                        if not matched and rows:
+                            matched = rows[0]  # Fallback to the first result if ID doesn't match
+                            
+                        if matched:
+                            varients = matched.get("varients", [])
+                            if varients and varients[0].get("productVarientUoms"):
+                                uom = varients[0]["productVarientUoms"][0]
+                                parameters["productVarientUomId"] = uom["id"]
+                                print(f"  [MARKETPLACE] Cart: Fetched productVarientUomId {uom['id']} via listv4")
+                            else:
+                                print(f"  [MARKETPLACE] Cart: Product has no variants/UOMs!")
+                        else:
+                            print(f"  [MARKETPLACE] Cart: Product not found in listv4 results!")
+                    else:
+                        print(f"  [MARKETPLACE] Cart: Product search failed with status {search_resp.status_code}")
+                except Exception as e:
+                    print(f"  [MARKETPLACE] Cart: Failed to fetch variant: {e}")
+
+        # If productVarientUomId is still missing, return an error early
+        if action_id == "add_to_cart" and not parameters.get("productVarientUomId"):
+            return {
+                "success": False,
+                "message": "Sorry, this product is currently missing variant data in the marketplace catalog and cannot be added to the cart. Please try a different product (like product 1).",
+            }
+
+        # Default quantity to 1 if not provided
+        if not parameters.get("quantity"):
+            parameters["quantity"] = 1
+
+    # ── Cart: view_cart — strip storeId since the API rejects it ──
+    if action_id == "view_cart":
+        parameters.pop("storeId", None)
+
+    # ── Cart: remove_from_cart — resolve cart item index to cartId ──
+    if action_id == "remove_from_cart":
+        cart_id_param = parameters.get("cartId", "")
+        try:
+            idx = int(str(cart_id_param).strip())
+            marketplace_state = session.get("marketplaceState", {})
+            last_cart = marketplace_state.get("last_cart_shown", [])
+            if last_cart and 0 < idx <= len(last_cart):
+                parameters["cartId"] = last_cart[idx - 1].get("cartId")
+                print(f"  [MARKETPLACE] Cart: Resolved cart index {idx} to cartId {parameters['cartId']}")
+        except (ValueError, TypeError):
+            pass
+
+    # Run it!
+    method = action_schema.get("method", "GET").upper()
+    base_url = config.get("base_url", "").rstrip("/")
+    endpoint = f"{base_url}/{action_schema.get('endpoint', '').lstrip('/')}"
+
+    print(f"  [MARKETPLACE] Executing {action_id} at {endpoint}")
+    print(f"  [MARKETPLACE] Payload: {parameters}")
+
+    exec_result = {
         "success": False,
-        "message": f"The '{action_id}' feature is being built. Stay tuned!",
+        "service": "Infoware Marketplace",
+        "action": action_schema.get("actionName", action_id),
+        "data": None,
+        "error": None
+    }
+
+    try:
+        if method == "GET":
+            resp = requests.get(endpoint, headers=headers, params=parameters, timeout=15)
+        else:
+            resp = requests.post(endpoint, headers=headers, json=parameters, timeout=15)
+            
+        print(f"  [MARKETPLACE] Response: {resp.status_code}")
+        
+        if resp.status_code < 300:
+            exec_result["success"] = True
+            exec_result["data"] = resp.json()
+        else:
+            try:
+                error_data = resp.json()
+                exec_result["error"] = error_data.get("message", error_data.get("error", resp.text[:200]))
+            except Exception:
+                exec_result["error"] = resp.text[:200]
+    except Exception as e:
+        exec_result["error"] = str(e)
+    
+    # Format the result for the user
+    final_message = None
+    
+    if exec_result["success"]:
+        resp_data = exec_result["data"]
+        
+        if action_id == "search_products":
+            print(f"  [MARKETPLACE] SEARCH PARAMETERS: {parameters}")
+            # Extract products list from typical wraps
+            products = []
+            if isinstance(resp_data, list):
+                products = resp_data
+            elif isinstance(resp_data, dict):
+                data = resp_data.get("data", resp_data)
+                if isinstance(data, list):
+                    products = data
+                elif isinstance(data, dict):
+                    products = data.get("rows", data.get("docs", data.get("products", data.get("data", []))))
+            
+            cached_products = []
+            for p in products:
+                p_id = p.get("productId") or p.get("id") or p.get("_id") or p.get("uuid")
+                
+                langs = p.get("productLanguages", [])
+                p_name = langs[0].get("name") if langs else (p.get("name") or p.get("title") or "Unnamed Product")
+                
+                # Extract variant UOM ID and price from the nested structure
+                varients = p.get("varients", [])
+                p_variant_uom_id = None
+                p_company_id = None
+                if varients and varients[0].get("productVarientUoms"):
+                    uom = varients[0]["productVarientUoms"][0]
+                    p_variant_uom_id = uom.get("id")
+                    inventory = uom.get("inventory", {})
+                    p_price = inventory.get("price", 0.0)
+                    p_company_id = inventory.get("companyId")
+                else:
+                    p_price = p.get("sellingPrice") or p.get("price") or p.get("mrp") or 0.0
+                cached_products.append({
+                    "productId": p_id,
+                    "name": p_name,
+                    "price": p_price,
+                    "productVarientUomId": p_variant_uom_id,
+                    "companyId": p_company_id,
+                })
+            
+            # Cache in database
+            update_marketplace_state(session_id, {"last_products_shown": cached_products})
+            # Update local session dictionary
+            if "marketplaceState" not in session:
+                session["marketplaceState"] = {}
+            session["marketplaceState"]["last_products_shown"] = cached_products
+            
+            if not cached_products:
+                final_message = "I couldn't find any products matching your search criteria. Please try another query."
+            else:
+                final_message = "Here are the products I found for you:\n\n"
+                for idx, p in enumerate(cached_products, 1):
+                    price_str = f"${p['price']:.2f}" if isinstance(p['price'], (int, float)) else f"${p['price']}"
+                    final_message += f"*{idx}. {p['name']}*\n"
+                    final_message += f"   Price: {price_str}\n"
+                    final_message += f"   ID: `{p['productId']}`\n\n"
+                final_message += "You can type the product number (e.g., *'tell me about 1'*) or ask to add it to your cart!"
+                
+        elif action_id == "get_product_details":
+            product_data = resp_data.get("data", resp_data)
+            p_name = product_data.get("name") or product_data.get("title") or "Unnamed Product"
+            p_desc = product_data.get("description") or "No description available."
+            p_price = product_data.get("sellingPrice") or product_data.get("price")
+            p_mrp = product_data.get("mrp")
+            p_stock = product_data.get("stock") or product_data.get("totalStock", 0)
+            
+            final_message = f"🛍️ *{p_name}*\n"
+            if p_price is not None:
+                price_val = float(p_price) if isinstance(p_price, (int, float, str)) and str(p_price).replace('.', '', 1).replace('-', '', 1).isdigit() else 0.0
+                mrp_val = float(p_mrp) if isinstance(p_mrp, (int, float, str)) and str(p_mrp).replace('.', '', 1).replace('-', '', 1).isdigit() else 0.0
+                
+                price_str = f"${price_val:.2f}"
+                final_message += f"💵 *Price:* {price_str}"
+                if mrp_val > price_val:
+                    final_message += f" ~(Original: ${mrp_val:.2f})~"
+                final_message += "\n"
+            
+            stock_num = int(p_stock) if isinstance(p_stock, (int, float, str)) and str(p_stock).isdigit() else 0
+            stock_status = "In Stock" if stock_num > 0 else "Out of Stock"
+            final_message += f"📦 *Availability:* {stock_status} ({stock_num} items left)\n\n"
+            final_message += f"📝 *Description:*\n{p_desc}\n\n"
+            
+            # Parse variants
+            variants = product_data.get("variants") or product_data.get("productVarientUoms") or product_data.get("productVariants") or []
+            if variants:
+                final_message += "✨ *Available Options (Variants):*\n"
+                for v_idx, v in enumerate(variants, 1):
+                    v_id = v.get("productVarientUomId") or v.get("id") or v.get("uuid")
+                    v_name = v.get("uomName") or v.get("variantName") or v.get("name") or f"Option {v_idx}"
+                    v_price = v.get("sellingPrice") or v.get("price") or p_price
+                    v_stock = v.get("stock") or v.get("quantity", 0)
+                    
+                    val_price = float(v_price) if isinstance(v_price, (int, float, str)) and str(v_price).replace('.', '', 1).replace('-', '', 1).isdigit() else 0.0
+                    final_message += f"• *{v_name}*: ${val_price:.2f} (Stock: {v_stock}) | ID: `{v_id}`\n"
+                final_message += "\n"
+                
+            # Parse reviews / ratings if present
+            reviews = product_data.get("reviews") or product_data.get("productRatings") or []
+            avg_rating = product_data.get("averageRating") or product_data.get("rating")
+            if avg_rating:
+                final_message += f"⭐ *Rating:* {avg_rating}/5 based on {len(reviews)} reviews\n"
+                
+        elif action_id == "list_categories":
+            categories_list = resp_data.get("data", resp_data)
+            if not isinstance(categories_list, list):
+                categories_list = categories_list.get("rows", categories_list.get("docs", categories_list.get("categories", [])))
+                
+            if not categories_list:
+                final_message = "I couldn't find any shopping categories at the moment."
+            else:
+                final_message = "Explore our top shopping categories:\n\n"
+                for idx, cat in enumerate(categories_list[:10], 1):
+                    langs = cat.get("categoryLanguages", [])
+                    cat_name = langs[0].get("name") if langs else (cat.get("name") or "Unnamed Category")
+                    cat_id = cat.get("categoryId") or cat.get("id") or cat.get("uuid")
+                    cat_desc = langs[0].get("description") if langs else (cat.get("description") or "Browse products in this category")
+                    final_message += f"{idx}. *{cat_name}*\n"
+                    final_message += f"   ID: `{cat_id}`\n"
+                    final_message += f"   _{cat_desc}_\n\n"
+                final_message += "Select one of the categories to start shopping!"
+
+        elif action_id == "add_to_cart":
+            # Parse success response
+            cart_data = resp_data.get("data", resp_data)
+            product_name = parameters.get("productId", "item")
+            quantity = parameters.get("quantity", 1)
+
+            # Try to resolve the product name from our cached products
+            marketplace_state = session.get("marketplaceState", {})
+            last_products = marketplace_state.get("last_products_shown", [])
+            for p in last_products:
+                if p.get("productId") == parameters.get("productId"):
+                    product_name = p.get("name", product_name)
+                    break
+
+            final_message = f"✅ *Added to Cart!*\n\n"
+            final_message += f"🛒 *{product_name}* x {quantity}\n\n"
+            final_message += "You can:\n"
+            final_message += "• Say *'View my cart'* to see all items\n"
+            final_message += "• Continue shopping by searching for more products\n"
+            final_message += "• Say *'Checkout'* when you're ready to place your order"
+
+        elif action_id == "view_cart":
+            cart_data = resp_data.get("data", resp_data)
+            cart_items = []
+            if isinstance(cart_data, list):
+                cart_items = cart_data
+            elif isinstance(cart_data, dict):
+                cart_items = cart_data.get("rows", cart_data.get("items", cart_data.get("cartItems", [])))
+
+            if not cart_items:
+                final_message = "🛒 Your cart is empty! Search for products to start shopping."
+            else:
+                # Cache cart items for remove_from_cart index resolution
+                cached_cart = []
+                total = 0.0
+                final_message = "🛒 *Your Shopping Cart*\n\n"
+
+                for idx, item in enumerate(cart_items, 1):
+                    cart_id = item.get("id") or item.get("cartId") or item.get("_id")
+                    qty = item.get("quantity", 1)
+
+                    # Extract product name from nested structure
+                    product = item.get("product", {})
+                    p_langs = product.get("productLanguages", [])
+                    item_name = p_langs[0].get("name") if p_langs else (product.get("name") or item.get("productName") or "Unknown Item")
+
+                    # Extract price from inventory or item
+                    item_price = item.get("price") or item.get("unitPrice", 0)
+                    if not item_price:
+                        inv = item.get("inventory", {})
+                        item_price = inv.get("price", 0)
+
+                    try:
+                        item_price = float(item_price)
+                        qty_num = float(qty)
+                    except (ValueError, TypeError):
+                        item_price = 0.0
+                        qty_num = 1.0
+
+                    line_total = item_price * qty_num
+                    total += line_total
+
+                    final_message += f"*{idx}. {item_name}*\n"
+                    final_message += f"   Qty: {qty} | Price: ${item_price:.2f} | Subtotal: ${line_total:.2f}\n\n"
+
+                    cached_cart.append({
+                        "cartId": cart_id,
+                        "name": item_name,
+                        "quantity": qty,
+                        "price": item_price,
+                    })
+
+                final_message += f"💰 *Total: ${total:.2f}*\n\n"
+                final_message += "To remove an item, say *'Remove item 1'*\n"
+                final_message += "To checkout, say *'Place my order'*"
+
+                # Cache cart items in session
+                update_marketplace_state(session_id, {"last_cart_shown": cached_cart})
+                if "marketplaceState" not in session:
+                    session["marketplaceState"] = {}
+                session["marketplaceState"]["last_cart_shown"] = cached_cart
+
+        elif action_id == "remove_from_cart":
+            final_message = "🗑️ *Item removed from your cart.*\n\n"
+            final_message += "Say *'View my cart'* to see your updated cart."
+
+    if final_message is None:
+        # Fallback to the generic action formatter
+        from phase4_integrations.executor import format_action_result
+        final_message = format_action_result(exec_result)
+
+    return {
+        "success": exec_result["success"],
+        "message": final_message,
     }

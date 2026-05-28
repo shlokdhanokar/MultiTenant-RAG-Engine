@@ -22,6 +22,7 @@ def load_marketplace_config():
 
     return {
         "base_url": os.getenv("MARKETPLACE_BASE_URL", "https://marketplaceapp.infoware.xyz/api/"),
+        "domain_id": os.getenv("MARKETPLACE_DOMAIN_ID", ""),
         "default_store_id": os.getenv("MARKETPLACE_DEFAULT_STORE_ID", ""),
         "default_currency_id": os.getenv("MARKETPLACE_DEFAULT_CURRENCY_ID", ""),
     }
@@ -46,10 +47,10 @@ MARKETPLACE_SERVICE = {
         {
             "actionId": "send_otp",
             "actionName": "Send Login OTP",
-            "description": "Send an OTP to the user's phone number to authenticate them for shopping.",
+            "description": "Send an OTP to the user's email address to authenticate them for shopping.",
             "method": "POST",
             "endpoint": "user/auth/generate-login-otp",
-            "parameters": ["phone"],
+            "parameters": ["email"],
             "requiresAuth": False,
         },
         {
@@ -58,7 +59,7 @@ MARKETPLACE_SERVICE = {
             "description": "Verify the OTP code the user typed to complete login.",
             "method": "POST",
             "endpoint": "user/auth/verify-login-otp",
-            "parameters": ["phone", "otp"],
+            "parameters": ["email", "otp"],
             "requiresAuth": False,
         },
 
@@ -66,10 +67,10 @@ MARKETPLACE_SERVICE = {
         {
             "actionId": "search_products",
             "actionName": "Search Products",
-            "description": "Search or browse products in the marketplace catalog.",
+            "description": "Search or browse products in the marketplace catalog. IMPORTANT: Always normalize the searchKey to a singular base word (e.g., 'orange' instead of 'oranges', 'apple' instead of 'apples') to ensure the database query works.",
             "method": "POST",
             "endpoint": "user/product/listv4",
-            "parameters": ["limit", "offset", "categoryId", "storeId"],
+            "parameters": ["limit", "offset", "categoryId", "storeId", "searchKey"],
             "requiresAuth": True,
         },
         {

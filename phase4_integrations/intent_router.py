@@ -44,12 +44,31 @@ def build_tool_definitions(connected_services):
     """
     tools = []
 
+    # Internal/automatic parameters that the user shouldn't be required to provide in chat.
+    NOT_REQUIRED_PARAMS = {
+        "customerId", "storeId", "customerPhone", "currencyId", 
+        "limit", "offset", "categoryId", "totalAmount", 
+        "paidAmount", "deliverySlotId", "deliverySlotTiming", 
+        "deliverySlotName", "deliveryCharge", "customerDeliveryAddressId",
+        "productVarientUomId"
+    }
+
     for service in connected_services:
         for action in service["actions"]:
             # Build parameter schema from the action's parameter list
             properties = {}
             for param in action.get("parameters", []):
-                properties[param] = {"type": "string", "description": f"The {param} value"}
+                # Infer type for known numeric fields
+                if param in ("limit", "offset", "quantity", "totalAmount", "paidAmount", "deliveryCharge"):
+                    param_type = "number"
+                else:
+                    param_type = "string"
+                properties[param] = {"type": param_type, "description": f"The {param} value"}
+
+            required_params = [
+                p for p in action.get("parameters", [])
+                if p not in NOT_REQUIRED_PARAMS
+            ]
 
             tool = {
                 "type": "function",
@@ -59,7 +78,7 @@ def build_tool_definitions(connected_services):
                     "parameters": {
                         "type": "object",
                         "properties": properties,
-                        "required": list(properties.keys())
+                        "required": required_params
                     }
                 }
             }
@@ -99,15 +118,11 @@ def route_intent(query, project_id, project_config, chat_history=None):
     tools = build_tool_definitions(connected_services)
 
     # 3. Build the system prompt
-    system_prompt = f"""{project_config.get('projectInstruction', 'You are a helpful AI assistant.')}
+    system_prompt = """You are an intent routing assistant. Your ONLY job is to decide whether to call a function/tool or route to RAG.
 
-You have access to the following external integrations. If the user's message
-is clearly requesting a real-world action (like creating an event, placing an order,
-sending a message), call the appropriate function.
+CRITICAL INSTRUCTION: If the user's message is requesting any e-commerce or shopping action that maps to one of the available integration tools (e.g. searching products, viewing the cart, "show my cart", adding items to the cart, placing an order, etc.), you MUST call the appropriate function. Do NOT answer these with normal text.
 
-If the user is just asking a question or having a conversation, respond normally
-with a short message saying you'll answer from the knowledge base. Do NOT call
-any function for simple questions."""
+Only route to RAG (by returning normal text) if the user is asking a general knowledge question that does NOT relate to any available integration tool."""
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -129,6 +144,12 @@ any function for simple questions."""
             temperature=0.1,
             max_tokens=300
         )
+        try:
+            usage = response.usage
+            from token_logger import log_openai_expenditure
+            log_openai_expenditure("Intent Routing", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+        except Exception as log_err:
+            print(f"Failed to log intent routing tokens: {log_err}")
     except Exception as e:
         print(f"  [INTENT] OpenAI call failed: {e}")
         return {"type": "rag"}

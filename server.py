@@ -508,7 +508,7 @@ def core_chat_logic(data, admin, project_id):
     chat_history = get_chat_history(session_id)
 
     # ===== PHASE 5: MARKETPLACE STATE CHECK (before intent routing) =====
-    # If the user is mid-flow (e.g., we asked for their phone number or OTP),
+    # If the user is mid-flow (e.g., we asked for their email or OTP),
     # we handle the message directly without burning LLM tokens on intent routing.
     from database import get_marketplace_state
     marketplace_state = get_marketplace_state(session_id)
@@ -516,8 +516,8 @@ def core_chat_logic(data, admin, project_id):
     if marketplace_state and marketplace_state.get("current_step") not in (None, "idle"):
         current_step = marketplace_state["current_step"]
 
-        if current_step == "awaiting_phone":
-            # The user's message IS their phone number
+        if current_step == "awaiting_email":
+            # The user's message IS their email address
             from phase4_integrations.marketplace_auth import initiate_otp_login
             result = initiate_otp_login(query.strip(), session_id)
             ai_text = result["message"]
@@ -530,9 +530,16 @@ def core_chat_logic(data, admin, project_id):
             return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id
 
         elif current_step == "awaiting_otp":
-            # The user's message IS the OTP code
-            from phase4_integrations.marketplace_auth import verify_otp_and_authenticate
-            result = verify_otp_and_authenticate(query.strip(), session_id, marketplace_state)
+            query_clean = query.strip()
+            # If the user typed an email address instead of an OTP, restart the flow
+            if "@" in query_clean and "." in query_clean:
+                from phase4_integrations.marketplace_auth import initiate_otp_login
+                result = initiate_otp_login(query_clean, session_id)
+            else:
+                # The user's message IS the OTP code
+                from phase4_integrations.marketplace_auth import verify_otp_and_authenticate
+                result = verify_otp_and_authenticate(query_clean, session_id, marketplace_state)
+            
             ai_text = result["message"]
             tenant_config = project_config
 
@@ -598,6 +605,12 @@ def core_chat_logic(data, admin, project_id):
             temperature=0.0,
         )
         search_query = translate_resp.choices[0].message.content.strip()
+        try:
+            usage = translate_resp.usage
+            from token_logger import log_openai_expenditure
+            log_openai_expenditure("Query Translation", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+        except Exception as log_err:
+            print(f"Failed to log translation tokens: {log_err}")
 
     # 2. Retrieval
     from phase2_retrieval.rag_logic import generate_text_embedding

@@ -93,6 +93,13 @@ Fill the best template with the RAG information."""
                 ],
                 response_format={"type": "json_object"}
             )
+            try:
+                usage = resp.usage
+                from token_logger import log_openai_expenditure
+                log_openai_expenditure("Template Selection Agent", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+            except Exception as log_err:
+                print(f"  [FORMATTER] Failed to log template selection tokens: {log_err}")
+                
             result = json.loads(resp.choices[0].message.content)
             chosen_type = result.get("template_type", "template")
             type_data = result
@@ -120,6 +127,13 @@ Choose the best WhatsApp session type and format the response."""
                 ],
                 response_format={"type": "json_object"}
             )
+            try:
+                usage = resp.usage
+                from token_logger import log_openai_expenditure
+                log_openai_expenditure("WhatsApp Formatting Agent", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+            except Exception as log_err:
+                print(f"  [FORMATTER] Failed to log formatter tokens: {log_err}")
+                
             llm_output = json.loads(resp.choices[0].message.content)
         except Exception as e:
             print(f"  [FORMATTER] LLM Error: {e}")

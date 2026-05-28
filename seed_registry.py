@@ -5,7 +5,10 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 from database import db
-from phase4_integrations.registry import SERVICES
+try:
+    from phase4_integrations.registry import SERVICES
+except ImportError:
+    SERVICES = {}
 
 def seed():
     print("Seeding Integration Registry into MongoDB...")
