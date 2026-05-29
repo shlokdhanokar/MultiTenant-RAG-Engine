@@ -13,7 +13,6 @@ A professional-grade, scalable RAG pipeline engineered to handle multiple distin
 [Explore Features](#-core-innovations) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
 </div>
-
 ---
 
 ## ✨ Core Innovations
