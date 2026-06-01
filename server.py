@@ -652,11 +652,15 @@ def chat_v2(admin, project_id):
             abort(400, description="Missing compulsory fields (query, user_id).")
 
         ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
-        
+
         # Return Phase 2 Format
         payload = format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url)
         payload["session_id"] = session_id
         return jsonify(payload)
+    except ValueError as ve:
+        if "the sessionid or userid is invalid" in str(ve):
+            return jsonify({"error": "the sessionid or userid is invalid"}), 400
+        raise
     except Exception as e:
         abort(500, description=str(e))
 
@@ -671,7 +675,7 @@ def chat_v3(admin, project_id):
             abort(400, description="Missing compulsory fields (query, user_id).")
 
         ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
-        
+
         # Prepare info for formatter
         image_urls = [f"{base_url}/image/{img_id}" for img_id in selected_image_ids]
         buttons = tenant_config.get("buttons", [])
@@ -696,6 +700,10 @@ def chat_v3(admin, project_id):
 
         agentic_payload["session_id"] = session_id
         return jsonify(agentic_payload)
+    except ValueError as ve:
+        if "the sessionid or userid is invalid" in str(ve):
+            return jsonify({"error": "the sessionid or userid is invalid"}), 400
+        raise
     except Exception as e:
         print(f"Chat v3 Error: {e}")
         import traceback

@@ -96,15 +96,19 @@ def perform_semantic_retrieval(query_embedding, knowledge_base_id, n=4):
 
 def get_or_create_session(session_id, user_id, admin_id, project_id):
     """
-    User-persistent session management.
+    User-persistent session management with session/user linkage validation.
+    Raises ValueError if session exists but is associated with a different userId.
     """
     from datetime import datetime, timezone
     sessions = db["chathistories"]
     session = sessions.find_one({"sessionId": session_id})
-    
+
     if session:
+        # Validate that the user_id matches the session's userId
+        if session.get("userId") != user_id:
+            raise ValueError("the sessionid or userid is invalid")
         return session
-        
+
     new_session = {
         "sessionId": session_id,
         "userId": user_id,
