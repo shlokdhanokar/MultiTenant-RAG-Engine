@@ -1,5 +1,6 @@
 import hashlib
 import os
+import uuid as _uuid
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -9,6 +10,21 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 MONGODB_URI = os.getenv("MONGODB_URI")
 client = MongoClient(MONGODB_URI)
 db = client[os.getenv("MONGODB_DB_NAME", "rag_db")]
+
+# Fixed namespace for deterministic UUID5 generation (never change this)
+_NAMESPACE = _uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+
+
+def generate_user_uuid(raw_user_id):
+    """
+    Generates a deterministic UUID from the raw user identifier (email / phone).
+    The same input always produces the same UUID.
+    """
+    normalized = raw_user_id.strip().lower()
+    return str(_uuid.uuid5(_NAMESPACE, normalized))
+
+
+
 
 def verify_master_key(api_key):
     """
@@ -104,9 +120,10 @@ def get_or_create_session(session_id, user_id, admin_id, project_id):
     session = sessions.find_one({"sessionId": session_id})
 
     if session:
-        # Validate that the user_id matches the session's userId
-        if session.get("userId") != user_id:
-            raise ValueError("the sessionid or userid is invalid")
+        # Validate that the user_id matches the session's userId (only if user_id is provided)
+        if user_id is not None and session.get("userId") is not None:
+            if session.get("userId") != user_id:
+                raise ValueError("the sessionid or userid is invalid")
         return session
 
     new_session = {

@@ -234,12 +234,16 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                 or email  # Robust fallback to email if no ID is found in the response
             )
 
-            # Store encrypted token + auth flag in the session document
+            from database import generate_user_uuid
+            new_user_id = generate_user_uuid(email)
+
+            # Store encrypted token + auth flag in the session document and link it to the user's UUID
             sessions = db["chathistories"]
             sessions.update_one(
                 {"sessionId": session_id},
                 {
                     "$set": {
+                        "userId": new_user_id,
                         "marketplaceAuth": {
                             "isAuthenticated": True,
                             "token": encrypted_token,
@@ -247,18 +251,16 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                             "customerId": customer_id,
                             "authenticatedAt": datetime.now(timezone.utc),
                         },
+                        "marketplaceState": {
+                            "current_step": "idle",
+                            "email": None,
+                        },
                         "updatedAt": datetime.now(timezone.utc),
                     }
                 },
             )
 
-            # Reset the marketplace flow state to idle
-            update_marketplace_state(session_id, {
-                "current_step": "idle",
-                "email": None,
-            })
-
-            print(f"  [MARKETPLACE] Authentication successful for {email}")
+            print(f"  [MARKETPLACE] Authentication successful for {email}. Linked session {session_id} to user {new_user_id}")
 
             # Fetch and cache user profile in the background
             # Re-read the session to get the freshly stored token
@@ -277,10 +279,11 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                     "success": True,
                     "message": (
                         f"{greeting}You're now logged in.\n\n"
-                        f"Let me continue with your request..."
+                        f"How can i help you?"
                     ),
                     "pending_action": pending_action,
                     "pending_parameters": marketplace_state.get("pending_parameters", {}),
+                    "new_user_id": new_user_id,
                 }
 
             return {
@@ -289,6 +292,7 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                     f"{greeting}You're now logged in and ready to shop!\n\n"
                     "You can browse products, add items to your cart, or check your orders."
                 ),
+                "new_user_id": new_user_id,
             }
 
         else:

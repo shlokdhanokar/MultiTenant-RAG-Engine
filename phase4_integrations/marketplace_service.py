@@ -67,7 +67,7 @@ MARKETPLACE_SERVICE = {
         {
             "actionId": "search_products",
             "actionName": "Search Products",
-            "description": "Search or browse products in the marketplace catalog. IMPORTANT: Always normalize the searchKey to a singular base word (e.g., 'orange' instead of 'oranges', 'apple' instead of 'apples') to ensure the database query works.",
+            "description": "Search or browse products in the marketplace catalog. IMPORTANT: Always translate the searchKey to English and normalize to a singular base word (e.g., 'orange' instead of 'oranges', 'apple' instead of 'apples') to ensure the database query works.",
             "method": "POST",
             "endpoint": "user/product/listv4",
             "parameters": ["limit", "offset", "categoryId", "storeId", "searchKey"],

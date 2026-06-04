@@ -471,17 +471,34 @@ def list_projects(admin_id):
 
     return jsonify({"adminId": admin_id, "projects": projects})
 
+def translate_action_response(text, query):
+    from phase2_retrieval.rag_logic import openai_client
+    try:
+        translate_resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a translation engine. Your task is to translate the SOURCE_TEXT into the EXACT SAME language and script as the USER_QUERY. If the query is Hinglish (Hindi written in English letters), translate the SOURCE_TEXT into casual, conversational Hinglish (using normal everyday words, DO NOT use pure or formal Hindi). DO NOT return or answer the USER_QUERY. Return ONLY the translated SOURCE_TEXT. Preserve all formatting, markdown, and emojis exactly."},
+                {"role": "user", "content": f"USER_QUERY: {query}\n\nSOURCE_TEXT:\n{text}"}
+            ],
+            temperature=0.0,
+        )
+        return translate_resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"  [TRANSLATE] Failed to translate action response: {e}")
+        return text
+
 def core_chat_logic(data, admin, project_id):
     """
     Shared core logic for both /chat/v2 and /chat/v3.
     """
     query = data['query']
-    user_id = data.get('user_id')
-    session_id = data.get('session_id')
+    raw_user_id = data.get('user_id')
+    client_session_id = data.get('session_id')
     admin_id = admin["adminId"]
 
     # Validate admin exists
     from database import get_project_config, get_or_create_session, get_chat_history, save_chat_message
+    from database import generate_user_uuid
 
     # Fetch project config
     project_config = get_project_config(project_id)
@@ -490,12 +507,26 @@ def core_chat_logic(data, admin, project_id):
 
     kb_id = project_id
 
-    # Session Allocation
-    if not session_id and user_id:
-        session_id = f"sess_{user_id}"
-    elif not session_id:
+    # ===== SECURE SESSION ALLOCATION =====
+    # We maintain a common session ID throughout (created at first query step).
+    # If client_session_id is provided, we continue to use it.
+    # Otherwise, we generate a new UUID-based session ID.
+    if client_session_id:
+        session_id = client_session_id
+    else:
         import uuid
-        session_id = f"sess_{str(uuid.uuid4())[:8]}"
+        session_id = f"sess_{uuid.uuid4()}"
+
+    # If raw_user_id (email/phone) is provided:
+    #   We derive user_id from it via UUID5.
+    # If raw_user_id is NOT provided:
+    #   The session is anonymous (user_id = None).
+    if raw_user_id:
+        user_id = generate_user_uuid(raw_user_id)
+    else:
+        user_id = None
+
+    print(f"  [SESSION] Raw user: {raw_user_id} -> userId: {user_id}, sessionId: {session_id}")
 
     # Create or find the session
     session_obj = get_or_create_session(session_id, user_id, admin_id, project_id)
@@ -503,6 +534,33 @@ def core_chat_logic(data, admin, project_id):
     # Decision Layer: Check if session is expired (>24 hours since last activity)
     from database import is_session_expired
     is_expired = is_session_expired(session_obj)
+
+    if is_expired:
+        from datetime import datetime, timezone
+        from database import db
+        # Reset the session to anonymous, clear chat history and reset marketplace state
+        sessions = db["chathistories"]
+        sessions.update_one(
+            {"sessionId": session_id},
+            {
+                "$set": {
+                    "userId": None,
+                    "messages": [],
+                    "marketplaceAuth": {
+                        "isAuthenticated": False,
+                        "token": None,
+                        "email": None,
+                        "customerId": None
+                    },
+                    "marketplaceState": {"current_step": "idle"},
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        # Refresh the session object from database
+        session_obj = sessions.find_one({"sessionId": session_id})
+        # Since the session expired, the user is now anonymous (user_id = None)
+        user_id = None
 
     # Fetch history
     chat_history = get_chat_history(session_id)
@@ -523,6 +581,8 @@ def core_chat_logic(data, admin, project_id):
             ai_text = result["message"]
             tenant_config = project_config
 
+            ai_text = translate_action_response(ai_text, query)
+
             save_chat_message(session_id, "user", query)
             save_chat_message(session_id, "ai", ai_text)
 
@@ -542,6 +602,8 @@ def core_chat_logic(data, admin, project_id):
             
             ai_text = result["message"]
             tenant_config = project_config
+
+            ai_text = translate_action_response(ai_text, query)
 
             save_chat_message(session_id, "user", query)
             save_chat_message(session_id, "ai", ai_text)
@@ -577,6 +639,8 @@ def core_chat_logic(data, admin, project_id):
             ai_text = format_action_result(result)
 
         tenant_config = project_config
+
+        ai_text = translate_action_response(ai_text, query)
 
         # Save Turn
         save_chat_message(session_id, "user", query)
@@ -648,8 +712,8 @@ def chat_v2(admin, project_id):
     """Phase 2: Standard Reply Array output."""
     try:
         data = request.json
-        if not data or 'query' not in data or 'user_id' not in data:
-            abort(400, description="Missing compulsory fields (query, user_id).")
+        if not data or 'query' not in data:
+            abort(400, description="Missing compulsory fields (query).")
 
         ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
 
@@ -671,15 +735,15 @@ def chat_v3(admin, project_id):
     """Phase 3: Agentic Session Message output."""
     try:
         data = request.json
-        if not data or 'query' not in data or 'user_id' not in data:
-            abort(400, description="Missing compulsory fields (query, user_id).")
+        if not data or 'query' not in data:
+            abort(400, description="Missing compulsory fields (query).")
 
         ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
 
         # Prepare info for formatter
         image_urls = [f"{base_url}/image/{img_id}" for img_id in selected_image_ids]
         buttons = tenant_config.get("buttons", [])
-        user_info = {"name": data.get("user_name", "User"), "phone": data["user_id"]}
+        user_info = {"name": data.get("user_name", "User"), "phone": data.get("user_id", "")}
         tag_ids = data.get("tag_ids", [])
 
         # NEW: Fetch templates for decision layer

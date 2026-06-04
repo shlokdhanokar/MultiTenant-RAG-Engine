@@ -122,6 +122,8 @@ def route_intent(query, project_id, project_config, chat_history=None):
 
 CRITICAL INSTRUCTION: If the user's message is requesting any e-commerce or shopping action that maps to one of the available integration tools (e.g. searching products, viewing the cart, "show my cart", adding items to the cart, placing an order, etc.), you MUST call the appropriate function. Do NOT answer these with normal text.
 
+CRITICAL PARAMETER TRANSLATION: If the user's query is in a non-English language or written in Romanized scripts (e.g. Hinglish "mujhe narangi chahiye"), you MUST translate the actual search terms into English before passing them as function arguments. For example, if they search for "narangi" or "seb", you must pass {"searchKey": "orange"} or {"searchKey": "apple"}. 
+
 Only route to RAG (by returning normal text) if the user is asking a general knowledge question that does NOT relate to any available integration tool."""
 
     messages = [{"role": "system", "content": system_prompt}]

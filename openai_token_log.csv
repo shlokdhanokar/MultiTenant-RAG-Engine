@@ -219,3 +219,106 @@ Date,Time,Operation,Model,Input Tokens,Output Tokens,Total Tokens,Cost (USD)
 2026-05-27,18:47:54,WhatsApp Formatting Agent,gpt-4o-mini,1024,235,1259,$0.000295
 2026-05-27,18:48:49,Intent Routing,gpt-4o-mini,1310,19,1329,$0.000208
 2026-05-27,18:48:52,WhatsApp Formatting Agent,gpt-4o-mini,750,50,800,$0.000142
+2026-06-02,01:00:40,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:00:45,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-02,01:11:22,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:11:27,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-02,01:11:50,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:11:52,WhatsApp Formatting Agent,gpt-4o-mini,759,75,834,$0.000159
+2026-06-02,01:11:56,WhatsApp Formatting Agent,gpt-4o-mini,751,29,780,$0.000130
+2026-06-02,01:12:17,Intent Routing,gpt-4o-mini,778,10,788,$0.000123
+2026-06-02,01:12:23,Text Embedding,text-embedding-3-small,1,0,1,$0.000000
+2026-06-02,01:12:25,WhatsApp Formatting Agent,gpt-4o-mini,738,22,760,$0.000124
+2026-06-02,01:20:28,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:20:31,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-02,01:20:34,WhatsApp Formatting Agent,gpt-4o-mini,751,29,780,$0.000130
+2026-06-02,01:21:31,Intent Routing,gpt-4o-mini,781,14,795,$0.000126
+2026-06-02,01:21:32,Text Embedding,text-embedding-3-small,4,0,4,$0.000000
+2026-06-02,01:21:33,WhatsApp Formatting Agent,gpt-4o-mini,741,22,763,$0.000124
+2026-06-02,01:21:38,Intent Routing,gpt-4o-mini,781,14,795,$0.000126
+2026-06-02,01:21:40,Text Embedding,text-embedding-3-small,4,0,4,$0.000000
+2026-06-02,01:21:47,WhatsApp Formatting Agent,gpt-4o-mini,741,22,763,$0.000124
+2026-06-02,01:21:51,Intent Routing,gpt-4o-mini,779,8,787,$0.000122
+2026-06-02,01:21:52,Text Embedding,text-embedding-3-small,2,0,2,$0.000000
+2026-06-02,01:21:53,WhatsApp Formatting Agent,gpt-4o-mini,739,22,761,$0.000124
+2026-06-02,01:25:26,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:25:30,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-02,01:26:32,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-02,01:26:36,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-02,01:27:12,Intent Routing,gpt-4o-mini,779,20,799,$0.000129
+2026-06-02,01:27:15,WhatsApp Formatting Agent,gpt-4o-mini,756,77,833,$0.000160
+2026-06-02,01:27:58,WhatsApp Formatting Agent,gpt-4o-mini,747,29,776,$0.000129
+2026-06-02,01:28:36,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-02,01:29:38,WhatsApp Formatting Agent,gpt-4o-mini,747,22,769,$0.000125
+2026-06-02,01:39:46,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:39:52,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-02,01:40:01,WhatsApp Formatting Agent,gpt-4o-mini,751,29,780,$0.000130
+2026-06-02,01:44:19,Intent Routing,gpt-4o-mini,783,19,802,$0.000129
+2026-06-02,01:44:37,WhatsApp Formatting Agent,gpt-4o-mini,759,75,834,$0.000159
+2026-06-02,01:44:57,WhatsApp Formatting Agent,gpt-4o-mini,751,29,780,$0.000130
+2026-06-02,01:45:20,WhatsApp Formatting Agent,gpt-4o-mini,745,29,774,$0.000129
+2026-06-02,01:45:42,Intent Routing,gpt-4o-mini,781,14,795,$0.000126
+2026-06-02,01:45:46,Text Embedding,text-embedding-3-small,4,0,4,$0.000000
+2026-06-02,01:45:48,WhatsApp Formatting Agent,gpt-4o-mini,741,22,763,$0.000124
+2026-06-02,01:45:53,Intent Routing,gpt-4o-mini,781,14,795,$0.000126
+2026-06-02,01:45:54,Text Embedding,text-embedding-3-small,4,0,4,$0.000000
+2026-06-02,01:45:55,WhatsApp Formatting Agent,gpt-4o-mini,741,22,763,$0.000124
+2026-06-02,01:45:58,Intent Routing,gpt-4o-mini,779,8,787,$0.000122
+2026-06-02,01:45:59,Text Embedding,text-embedding-3-small,2,0,2,$0.000000
+2026-06-02,01:46:00,WhatsApp Formatting Agent,gpt-4o-mini,739,22,761,$0.000124
+2026-06-02,01:46:04,Intent Routing,gpt-4o-mini,783,27,810,$0.000134
+2026-06-02,01:46:06,Text Embedding,text-embedding-3-small,6,0,6,$0.000000
+2026-06-02,01:46:07,WhatsApp Formatting Agent,gpt-4o-mini,743,22,765,$0.000125
+2026-06-02,01:49:58,Intent Routing,gpt-4o-mini,882,18,900,$0.000143
+2026-06-02,01:50:16,WhatsApp Formatting Agent,gpt-4o-mini,1021,230,1251,$0.000291
+2026-06-03,14:51:55,Intent Routing,gpt-4o-mini,778,10,788,$0.000123
+2026-06-03,14:52:00,Text Embedding,text-embedding-3-small,1,0,1,$0.000000
+2026-06-03,14:52:01,RAG Response,gpt-4o-mini,905,30,935,$0.000154
+2026-06-03,14:52:04,WhatsApp Formatting Agent,gpt-4o-mini,759,43,802,$0.000140
+2026-06-03,14:52:54,Intent Routing,gpt-4o-mini,782,18,800,$0.000128
+2026-06-03,14:52:56,WhatsApp Formatting Agent,gpt-4o-mini,758,77,835,$0.000160
+2026-06-03,14:53:24,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-03,14:53:28,WhatsApp Formatting Agent,gpt-4o-mini,754,30,784,$0.000131
+2026-06-03,14:53:51,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-03,14:53:54,WhatsApp Formatting Agent,gpt-4o-mini,754,30,784,$0.000131
+2026-06-03,17:13:46,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-03,17:13:49,WhatsApp Formatting Agent,gpt-4o-mini,754,30,784,$0.000131
+2026-06-04,13:56:36,Intent Routing,gpt-4o-mini,778,10,788,$0.000123
+2026-06-04,13:56:41,Text Embedding,text-embedding-3-small,1,0,1,$0.000000
+2026-06-04,13:56:43,RAG Response,gpt-4o-mini,905,30,935,$0.000154
+2026-06-04,13:56:46,WhatsApp Formatting Agent,gpt-4o-mini,759,43,802,$0.000140
+2026-06-04,14:45:03,Intent Routing,gpt-4o-mini,780,18,798,$0.000128
+2026-06-04,14:45:05,WhatsApp Formatting Agent,gpt-4o-mini,756,77,833,$0.000160
+2026-06-04,14:45:15,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-04,14:45:19,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-04,14:45:40,Intent Routing,gpt-4o-mini,779,20,799,$0.000129
+2026-06-04,14:45:43,WhatsApp Formatting Agent,gpt-4o-mini,756,75,831,$0.000158
+2026-06-04,14:46:00,WhatsApp Formatting Agent,gpt-4o-mini,747,29,776,$0.000129
+2026-06-04,14:47:44,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-04,14:47:47,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-04,14:48:11,Intent Routing,gpt-4o-mini,779,19,798,$0.000128
+2026-06-04,14:48:13,Text Embedding,text-embedding-3-small,2,0,2,$0.000000
+2026-06-04,14:48:14,RAG Response,gpt-4o-mini,906,13,919,$0.000144
+2026-06-04,14:48:15,WhatsApp Formatting Agent,gpt-4o-mini,744,26,770,$0.000127
+2026-06-04,14:51:17,Intent Routing,gpt-4o-mini,784,18,802,$0.000128
+2026-06-04,14:51:21,WhatsApp Formatting Agent,gpt-4o-mini,760,77,837,$0.000160
+2026-06-04,14:51:44,Intent Routing,gpt-4o-mini,786,26,812,$0.000133
+2026-06-04,14:51:47,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-04,14:52:41,Intent Routing,gpt-4o-mini,779,20,799,$0.000129
+2026-06-04,14:52:42,WhatsApp Formatting Agent,gpt-4o-mini,756,61,817,$0.000150
+2026-06-04,14:54:56,Intent Routing,gpt-4o-mini,784,18,802,$0.000128
+2026-06-04,14:55:00,WhatsApp Formatting Agent,gpt-4o-mini,759,77,836,$0.000160
+2026-06-04,14:55:25,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-04,14:55:49,WhatsApp Formatting Agent,gpt-4o-mini,747,31,778,$0.000131
+2026-06-04,15:16:40,Intent Routing,gpt-4o-mini,786,19,805,$0.000129
+2026-06-04,15:16:44,WhatsApp Formatting Agent,gpt-4o-mini,762,75,837,$0.000159
+2026-06-04,15:17:30,WhatsApp Formatting Agent,gpt-4o-mini,770,46,816,$0.000143
+2026-06-04,15:17:57,WhatsApp Formatting Agent,gpt-4o-mini,746,32,778,$0.000131
+2026-06-04,15:18:10,Intent Routing,gpt-4o-mini,902,19,921,$0.000147
+2026-06-04,15:18:13,WhatsApp Formatting Agent,gpt-4o-mini,750,28,778,$0.000129
+2026-06-04,15:29:37,Intent Routing,gpt-4o-mini,891,19,910,$0.000145
+2026-06-04,15:29:43,WhatsApp Formatting Agent,gpt-4o-mini,744,21,765,$0.000124
+2026-06-04,15:36:34,Intent Routing,gpt-4o-mini,956,18,974,$0.000154
+2026-06-04,15:36:50,WhatsApp Formatting Agent,gpt-4o-mini,1048,220,1268,$0.000289
+2026-06-04,15:37:07,Intent Routing,gpt-4o-mini,1259,18,1277,$0.000200
+2026-06-04,15:37:16,WhatsApp Formatting Agent,gpt-4o-mini,965,177,1142,$0.000251
