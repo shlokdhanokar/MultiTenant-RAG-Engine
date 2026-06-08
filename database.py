@@ -246,6 +246,21 @@ def clear_marketplace_state(session_id):
     )
 
 
+def log_api_call(log_data):
+    """
+    Log an API request (incoming or outgoing) to the api_logs collection.
+    """
+    from datetime import datetime, timezone
+    # Add timestamp if not present
+    if "timestamp" not in log_data:
+        log_data["timestamp"] = datetime.now(timezone.utc)
+    
+    # Fire and forget into MongoDB
+    try:
+        db["api_logs"].insert_one(log_data)
+    except Exception as e:
+        print(f"Failed to log API call: {e}")
+
 if __name__ == "__main__":
     try:
         client.admin.command('ping')

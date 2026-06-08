@@ -23,6 +23,7 @@ def admin_key_required(f):
         if not admin:
             abort(401, description="Invalid Master API Key")
         
+        request.admin_id = admin.get("adminId")
         # Pass the admin object to the route
         return f(admin, *args, **kwargs)
     return decorated_function
@@ -47,6 +48,9 @@ def project_key_required(f):
         # Extract the specific projectId linked to this key
         project_id = next((pk["projectId"] for pk in admin["projectKeys"] if pk["hashedKey"] == hashed_key), None)
         
+        request.admin_id = admin.get("adminId")
+        request.project_id = project_id
+
         # Pass admin and project_id to the route
         return f(admin, project_id, *args, **kwargs)
     return decorated_function
@@ -88,6 +92,92 @@ def init_gridfs_bucket():
 fs = init_gridfs_bucket()
 
 app = Flask(__name__)
+
+# ===== GLOBAL REQUEST LOGGING =====
+from database import log_api_call
+
+@app.before_request
+def start_timer():
+    request.start_time = time.time()
+
+@app.after_request
+def log_incoming_request(response):
+    if request.path == '/health':
+        return response
+
+    duration_ms = (time.time() - getattr(request, 'start_time', time.time())) * 1000
+
+    payload = None
+    if request.is_json:
+        try:
+            payload = request.get_json(silent=True)
+        except Exception:
+            pass
+
+    log_data = {
+        "type": "incoming",
+        "endpoint": request.path,
+        "method": request.method,
+        "clientIp": request.remote_addr,
+        "response_status": response.status_code,
+        "duration_ms": round(duration_ms, 2),
+        "projectId": getattr(request, 'project_id', None),
+        "adminId": getattr(request, 'admin_id', None),
+        "request_payload": payload
+    }
+    
+    log_api_call(log_data)
+    return response
+
+
+# ===== OUTGOING REQUEST LOGGING (MONKEY-PATCH) =====
+import requests
+
+_original_request = requests.Session.request
+
+def logged_request(self, method, url, **kwargs):
+    start_time = time.time()
+    try:
+        response = _original_request(self, method, url, **kwargs)
+        duration_ms = (time.time() - start_time) * 1000
+        
+        payload = kwargs.get('json') or kwargs.get('data')
+        if isinstance(payload, dict):
+            # Mask sensitive tokens if needed
+            pass
+            
+        from flask import has_request_context
+        
+        log_data = {
+            "type": "outgoing",
+            "endpoint": url,
+            "method": method.upper(),
+            "response_status": response.status_code,
+            "duration_ms": round(duration_ms, 2),
+            "request_payload": payload,
+            # For outgoing, projectId is harder to extract globally, but we capture the raw call
+            "projectId": getattr(request, 'project_id', None) if has_request_context() else None
+        }
+        log_api_call(log_data)
+        return response
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        payload = kwargs.get('json') or kwargs.get('data')
+        from flask import has_request_context
+        log_data = {
+            "type": "outgoing",
+            "endpoint": url,
+            "method": method.upper(),
+            "response_status": 0,
+            "duration_ms": round(duration_ms, 2),
+            "request_payload": payload,
+            "error": str(e),
+            "projectId": getattr(request, 'project_id', None) if has_request_context() else None
+        }
+        log_api_call(log_data)
+        raise
+
+requests.Session.request = logged_request
 
 
 # ===== TOKEN USAGE MONITORING =====
@@ -587,7 +677,7 @@ def core_chat_logic(data, admin, project_id):
             save_chat_message(session_id, "ai", ai_text)
 
             base_url = request.host_url.rstrip('/')
-            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id
+            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
 
         elif current_step == "awaiting_otp":
             query_clean = query.strip()
@@ -609,7 +699,47 @@ def core_chat_logic(data, admin, project_id):
             save_chat_message(session_id, "ai", ai_text)
 
             base_url = request.host_url.rstrip('/')
-            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id
+            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+
+        elif current_step == "awaiting_cart_confirmation":
+            # The user is responding to "Add X to your cart? Yes/No"
+            from database import update_marketplace_state
+            answer = query.strip().lower()
+            is_yes = answer in ("yes", "yes ✅", "confirm_cart_yes", "y", "ha", "haan", "yes ✅")
+            is_no = answer in ("no", "no ❌", "confirm_cart_no", "n", "nahi", "nah", "cancel", "no ❌")
+
+            if is_yes:
+                pending_cart = marketplace_state.get("pending_cart", {})
+                if not pending_cart:
+                    update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+                    ai_text = "Something went wrong — I lost the cart data. Please try adding the item again."
+                    tenant_config = project_config
+                    save_chat_message(session_id, "user", query)
+                    save_chat_message(session_id, "ai", ai_text)
+                    base_url = request.host_url.rstrip('/')
+                    return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+
+                from phase4_integrations.marketplace_auth import execute_confirmed_cart_add
+                result = execute_confirmed_cart_add(session_obj, session_id, pending_cart)
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+            elif is_no:
+                update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+                ai_text = "No problem! Let me know if you'd like to browse more products. 🛍️"
+                wp_payload = None
+            else:
+                # User said something else — treat it as a new query, reset state
+                update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+                # Fall through to intent routing below
+                pass
+
+            if is_yes or is_no:
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
 
     # ===== PHASE 4: INTENT ROUTING (Action vs RAG) =====
     from phase4_integrations.intent_router import route_intent
@@ -628,6 +758,7 @@ def core_chat_logic(data, admin, project_id):
                 parameters=intent["parameters"]
             )
             ai_text = result["message"]
+            wp_payload = result.get("whatsapp_payload")
         else:
             # ── All other integrations → generic executor ──
             result = execute_action(
@@ -637,6 +768,7 @@ def core_chat_logic(data, admin, project_id):
                 parameters=intent["parameters"]
             )
             ai_text = format_action_result(result)
+            wp_payload = None
 
         tenant_config = project_config
 
@@ -647,7 +779,7 @@ def core_chat_logic(data, admin, project_id):
         save_chat_message(session_id, "ai", ai_text)
 
         base_url = request.host_url.rstrip('/')
-        return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id
+        return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
 
     # ===== STANDARD RAG FLOW =====
 
@@ -683,7 +815,7 @@ def core_chat_logic(data, admin, project_id):
     chunks = perform_semantic_retrieval(query_embedding, kb_id, n=4)
     
     if not chunks:
-        return "I'm sorry, I couldn't find any information.", [], project_config, "", session_id, is_expired, project_id
+        return "I'm sorry, I couldn't find any information.", [], project_config, "", session_id, is_expired, project_id, None
 
     # 3. Generation
     from phase2_retrieval.rag_logic import generate_rag_response
@@ -703,7 +835,7 @@ def core_chat_logic(data, admin, project_id):
         ai_text = ai_text.replace(image_match.group(0), "").strip()
 
     base_url = request.host_url.rstrip('/')
-    return ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id
+    return ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id, None
 
 
 @app.route('/chat/v2', methods=['POST'])
@@ -715,7 +847,7 @@ def chat_v2(admin, project_id):
         if not data or 'query' not in data:
             abort(400, description="Missing compulsory fields (query).")
 
-        ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
+        ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id, _wp = core_chat_logic(data, admin, project_id)
 
         # Return Phase 2 Format
         payload = format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url)
@@ -738,7 +870,25 @@ def chat_v3(admin, project_id):
         if not data or 'query' not in data:
             abort(400, description="Missing compulsory fields (query).")
 
-        ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id = core_chat_logic(data, admin, project_id)
+        ai_text, selected_image_ids, tenant_config, base_url, session_id, is_expired, project_id, wp_payload = core_chat_logic(data, admin, project_id)
+
+        # If marketplace returned a pre-built WhatsApp payload, use it directly
+        if wp_payload is not None:
+            user_info = {"name": data.get("user_name", "User"), "phone": data.get("user_id", "")}
+            tag_ids = data.get("tag_ids", [])
+            agentic_payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": user_info.get("phone", ""),
+                "type": wp_payload["type"],
+                "name": user_info.get("name", ""),
+                "phone": user_info.get("phone", ""),
+                "enable_acculync": True,
+                "tagIds": tag_ids,
+                "media": wp_payload["media"],
+            }
+            agentic_payload["session_id"] = session_id
+            return jsonify(agentic_payload)
 
         # Prepare info for formatter
         image_urls = [f"{base_url}/image/{img_id}" for img_id in selected_image_ids]

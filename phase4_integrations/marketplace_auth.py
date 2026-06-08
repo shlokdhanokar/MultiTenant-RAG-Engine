@@ -424,6 +424,91 @@ def fetch_user_profile(session, session_id):
         }
 
 
+
+def execute_confirmed_cart_add(session, session_id, pending_cart):
+    """
+    Called when the user confirms "Yes" to the add-to-cart prompt.
+    Fires the real cart API call using the pre-resolved parameters
+    saved in the session's marketplaceState.pending_cart.
+    """
+    print(f"  [MARKETPLACE] Executing confirmed add_to_cart for: {pending_cart.get('product_name')}")
+
+    # Get authenticated headers
+    success, headers = get_marketplace_token(session)
+    if not success:
+        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+        return {
+            "success": False,
+            "message": "Sorry, your login session expired. Please log in again.",
+        }
+
+    config = load_marketplace_config()
+    base_url = config.get("base_url", "").rstrip("/")
+    endpoint = f"{base_url}/user/cart/add"
+
+    # Build the API payload from the saved pending_cart
+    api_payload = {
+        "productId": pending_cart.get("productId"),
+        "productVarientUomId": pending_cart.get("productVarientUomId"),
+        "quantity": pending_cart.get("quantity", 1),
+        "storeId": pending_cart.get("storeId"),
+        "customerId": pending_cart.get("customerId"),
+        "customerPhone": pending_cart.get("customerPhone"),
+    }
+
+    print(f"  [MARKETPLACE] Cart API Payload: {api_payload}")
+
+    try:
+        resp = requests.post(endpoint, headers=headers, json=api_payload, timeout=15)
+        print(f"  [MARKETPLACE] Cart API Response: {resp.status_code}")
+
+        # Reset state regardless of outcome
+        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+
+        if resp.status_code < 300:
+            product_name = pending_cart.get("product_name", "item")
+            quantity = pending_cart.get("quantity", 1)
+            price = pending_cart.get("product_price", 0)
+            price_str = f" — ${price:.2f}" if price else ""
+
+            final_message = f"✅ *Added to Cart!*\n\n"
+            final_message += f"🛒 *{product_name}* x {quantity}{price_str}\n\n"
+
+            return {
+                "success": True,
+                "message": final_message,
+                "whatsapp_payload": {
+                    "type": "session_quick_reply_with_text",
+                    "media": {
+                        "header": {"text": ""},
+                        "body": final_message.strip(),
+                        "footer_text": "",
+                        "button": [
+                            {"id": "view_cart", "title": "View Cart 🛒"},
+                            {"id": "continue_shopping", "title": "Keep Shopping"},
+                        ]
+                    }
+                }
+            }
+        else:
+            try:
+                error_data = resp.json()
+                error_msg = error_data.get("message", error_data.get("error", resp.text[:200]))
+            except Exception:
+                error_msg = resp.text[:200]
+            return {
+                "success": False,
+                "message": f"Sorry, I couldn't add the item to your cart. The marketplace said: *{error_msg}*",
+            }
+
+    except requests.RequestException as e:
+        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+        return {
+            "success": False,
+            "message": f"Sorry, I couldn't reach the marketplace right now. Please try again.",
+        }
+
+
 def handle_marketplace_action(session, session_id, action_id, parameters):
     """
     Central router for all marketplace actions coming from the Intent Router.
@@ -630,9 +715,66 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
         if not parameters.get("quantity"):
             parameters["quantity"] = 1
 
+        # ── CONFIRMATION STEP ──
+        # Instead of calling the cart API right away, save the pending item
+        # and ask for a Yes/No confirmation.
+        product_name = "item"
+        product_price = 0.0
+        if resolved_product:
+            product_name = resolved_product.get("name", "item")
+            try:
+                product_price = float(resolved_product.get("price", 0))
+            except (ValueError, TypeError):
+                product_price = 0.0
+
+        quantity = parameters.get("quantity", 1)
+
+        # Save the fully-resolved parameters so we can fire the API call
+        # when the user confirms.
+        pending_cart = {
+            "productId": parameters.get("productId"),
+            "productVarientUomId": parameters.get("productVarientUomId"),
+            "quantity": quantity,
+            "storeId": parameters.get("storeId"),
+            "customerId": parameters.get("customerId"),
+            "customerPhone": parameters.get("customerPhone"),
+            "product_name": product_name,
+            "product_price": product_price,
+        }
+        update_marketplace_state(session_id, {
+            "current_step": "awaiting_cart_confirmation",
+            "pending_cart": pending_cart,
+        })
+
+        price_str = f" — ${product_price:.2f}" if product_price else ""
+        confirm_body = (
+            f"Add *{product_name}* (x{quantity}{price_str}) to your cart?"
+        )
+
+        return {
+            "success": True,
+            "message": confirm_body,
+            "whatsapp_payload": {
+                "type": "session_quick_reply_with_text",
+                "media": {
+                    "header": {"text": ""},
+                    "body": confirm_body,
+                    "footer_text": "",
+                    "button": [
+                        {"id": "confirm_cart_yes", "title": "Yes ✅"},
+                        {"id": "confirm_cart_no", "title": "No ❌"},
+                    ]
+                }
+            }
+        }
+
     # ── Cart: view_cart — strip storeId since the API rejects it ──
     if action_id == "view_cart":
         parameters.pop("storeId", None)
+
+    # ── Orders: list_orders — strip customerId since the API rejects it ──
+    if action_id == "list_orders":
+        parameters.pop("customerId", None)
 
     # ── Cart: remove_from_cart — resolve cart item index to cartId ──
     if action_id == "remove_from_cart":
@@ -685,6 +827,7 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
     
     # Format the result for the user
     final_message = None
+    whatsapp_payload = None
     
     if exec_result["success"]:
         resp_data = exec_result["data"]
@@ -739,13 +882,37 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
             if not cached_products:
                 final_message = "I couldn't find any products matching your search criteria. Please try another query."
             else:
+                # Build interactive list payload for WhatsApp
+                rows = []
+                for idx, p in enumerate(cached_products, 1):
+                    price_str = f"${p['price']:.2f}" if isinstance(p['price'], (int, float)) else f"${p['price']}"
+                    rows.append({
+                        "id": str(idx),
+                        "title": str(p['name'])[:24],
+                        "description": f"Price: {price_str}"[:72]
+                    })
+
+                whatsapp_payload = {
+                    "type": "session_interactive_list",
+                    "media": {
+                        "header": {"text": ""},
+                        "body": "Here are the products I found for you. Tap an item to add it to your cart!",
+                        "footer_text": "",
+                        "button_text": "View Products",
+                        "button": [{
+                            "section_title": "Products",
+                            "row": rows
+                        }]
+                    }
+                }
+
+                # Also build a plain-text fallback
                 final_message = "Here are the products I found for you:\n\n"
                 for idx, p in enumerate(cached_products, 1):
                     price_str = f"${p['price']:.2f}" if isinstance(p['price'], (int, float)) else f"${p['price']}"
                     final_message += f"*{idx}. {p['name']}*\n"
-                    final_message += f"   Price: {price_str}\n"
-                    final_message += f"   ID: `{p['productId']}`\n\n"
-                final_message += "You can type the product number (e.g., *'tell me about 1'*) or ask to add it to your cart!"
+                    final_message += f"   Price: {price_str}\n\n"
+                final_message += "Tap an item from the list to add it to your cart!"
                 
         elif action_id == "get_product_details":
             product_data = resp_data.get("data", resp_data)
@@ -824,12 +991,33 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
                     product_name = p.get("name", product_name)
                     break
 
+            price_val = 0.0
+            for p in last_products:
+                if p.get("productId") == parameters.get("productId"):
+                    try:
+                        price_val = float(p.get("price", 0))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
             final_message = f"✅ *Added to Cart!*\n\n"
-            final_message += f"🛒 *{product_name}* x {quantity}\n\n"
-            final_message += "You can:\n"
-            final_message += "• Say *'View my cart'* to see all items\n"
-            final_message += "• Continue shopping by searching for more products\n"
-            final_message += "• Say *'Checkout'* when you're ready to place your order"
+            final_message += f"🛒 *{product_name}* x {quantity}"
+            if price_val:
+                final_message += f" — ${price_val:.2f}"
+            final_message += "\n\n"
+
+            whatsapp_payload = {
+                "type": "session_quick_reply_with_text",
+                "media": {
+                    "header": {"text": ""},
+                    "body": final_message.strip(),
+                    "footer_text": "",
+                    "button": [
+                        {"id": "view_cart", "title": "View Cart 🛒"},
+                        {"id": "continue_shopping", "title": "Keep Shopping"},
+                    ]
+                }
+            }
 
         elif action_id == "view_cart":
             cart_data = resp_data.get("data", resp_data)
@@ -842,6 +1030,14 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
             if not cart_items:
                 final_message = "🛒 Your cart is empty! Search for products to start shopping."
             else:
+                import json
+                print("\n=== CART ITEMS DEBUG ===")
+                try:
+                    print(json.dumps(cart_items, indent=2))
+                except Exception as e:
+                    print(cart_items)
+                print("========================\n")
+                
                 # Cache cart items for remove_from_cart index resolution
                 cached_cart = []
                 total = 0.0
@@ -856,11 +1052,28 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
                     p_langs = product.get("productLanguages", [])
                     item_name = p_langs[0].get("name") if p_langs else (product.get("name") or item.get("productName") or "Unknown Item")
 
-                    # Extract price from inventory or item
+                    # Extract price from multiple possible locations in the hierarchy
                     item_price = item.get("price") or item.get("unitPrice", 0)
+                    
                     if not item_price:
+                        # Try priceInfo level (this is the correct one for cart API)
+                        item_price = item.get("priceInfo", {}).get("price", 0)
+                        
+                    if not item_price:
+                        # Try inventory level
                         inv = item.get("inventory", {})
                         item_price = inv.get("price", 0)
+                    
+                    if not item_price:
+                        # Try product level (based on developer feedback)
+                        item_price = product.get("price") or product.get("mrp") or product.get("sellingPrice", 0)
+                        
+                    if not item_price:
+                        # Try nested varient level
+                        varients = product.get("varients", [])
+                        if varients and varients[0].get("productVarientUoms"):
+                            uom = varients[0]["productVarientUoms"][0]
+                            item_price = uom.get("inventory", {}).get("price", 0)
 
                     try:
                         item_price = float(item_price)
@@ -896,12 +1109,48 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
             final_message = "🗑️ *Item removed from your cart.*\n\n"
             final_message += "Say *'View my cart'* to see your updated cart."
 
+        elif action_id == "list_orders":
+            orders = exec_result.get("data", {}).get("data", {}).get("rows", [])
+            if not orders:
+                final_message = "You don't have any orders yet! Type 'search' to find products."
+            else:
+                final_message = "📦 *Your Recent Orders*\n\n"
+                for idx, order in enumerate(orders[:5], 1): # Show up to 5
+                    order_no = order.get("orderNumber", "Unknown")
+                    status = str(order.get("orderStatus", "N/A")).replace("_", " ").title()
+                    total = order.get("totalAmount", 0)
+                    date_str = order.get("orderDate", "")[:10]  # Just grab the YYYY-MM-DD
+                    
+                    final_message += f"*{idx}. Order {order_no}*\n"
+                    final_message += f"   Status: {status} | Total: ${total:.2f} | Date: {date_str}\n"
+                    
+                    # Add product details
+                    order_products = order.get("orderProducts", [])
+                    if order_products:
+                        final_message += "   Items:\n"
+                        for op in order_products:
+                            qty = float(op.get("quantity", 1))
+                            
+                            # Extract product name from orderProductDetails
+                            details = op.get("orderProductDetails", [])
+                            name = "Unknown Product"
+                            if details and len(details) > 0:
+                                name = details[0].get("name", "Unknown Product")
+                                
+                            final_message += f"   - {name} (x{qty:g})\n"
+                            
+                    final_message += "\n"
+
     if final_message is None:
         # Fallback to the generic action formatter
         from phase4_integrations.executor import format_action_result
         final_message = format_action_result(exec_result)
 
-    return {
+    result = {
         "success": exec_result["success"],
         "message": final_message,
     }
+    # Attach structured WhatsApp payload if we built one
+    if whatsapp_payload is not None:
+        result["whatsapp_payload"] = whatsapp_payload
+    return result

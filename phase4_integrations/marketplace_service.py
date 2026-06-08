@@ -142,7 +142,7 @@ MARKETPLACE_SERVICE = {
             "description": "Show the user's order history.",
             "method": "POST",
             "endpoint": "user/order/list",
-            "parameters": ["customerId"],
+            "parameters": [],
             "requiresAuth": True,
         },
         {
