@@ -1,21 +1,21 @@
 <div align="center">
   
 # 🧠 Multi-Tenant RAG Engine
-### High-Precision, Media-Aware Retrieval-Augmented Generation
+### Enterprise-Grade, Media-Aware Retrieval-Augmented Generation
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Flask](https://img.shields.io/badge/Flask-Backend-green?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://mongodb.com)
 [![Gemini](https://img.shields.io/badge/Google-Gemini_AI-orange?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Integrations](https://img.shields.io/badge/Integrations-Ready-8A2BE2?style=for-the-badge&logo=webhooks&logoColor=white)](#-app-integration-ecosystem)
 
-A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. It features a revolutionary **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media.
+A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a revolutionary **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a wide range of external tools and APIs.
 
-[Explore Features](#-core-innovations) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
+[Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
 </div>
+
 ---
-
-
 
 ## ✨ Core Innovations
 
@@ -25,8 +25,22 @@ Build once, serve many. Our architecture uses strict `knowledge_base_id` boundar
 ### 📍 Physical-First Image Mapping
 Traditional PDF parsers lose context when extracting images. We built a custom algorithm that records the exact **Y-Coordinate** of every heading and image. Images are dynamically "anchored" to the text physically appearing above them, entirely eliminating the "leaking images" problem.
 
-### 🎯 Keyword-Scored Retrieval
-We don't just rely on standard vector or text search. Images are re-ranked in real-time based on **query keyword density** within their parent chunks, ensuring the most semantically relevant media is always prioritized.
+### 🎯 Contextual & Keyword-Scored Retrieval
+We don't just rely on standard vector or text search. Images and document chunks are re-ranked in real-time based on **query keyword density** within their parent chunks, ensuring the most semantically relevant media is always prioritized in the generative AI output.
+
+---
+
+## 🔗 App Integration Ecosystem
+
+The RAG Engine isn't just about reading documents; it's designed to take action. The architecture supports a seamless plug-and-play ecosystem for external applications. 
+
+By integrating function calling and intelligent intent routing, the engine can interact with third-party APIs to execute real-world tasks, including but not limited to:
+- 📅 **Scheduling:** Calendly, Google Calendar
+- 🛒 **E-Commerce:** Custom Marketplaces, Shopify
+- 💬 **Communication:** Slack, WhatsApp, Microsoft Teams
+- 📊 **CRM & Data:** Salesforce, HubSpot
+
+*Note: The engine uses intelligent routing to decide whether a user's prompt requires searching the RAG knowledge base or triggering an integrated application webhook.*
 
 ---
 
@@ -34,9 +48,9 @@ We don't just rely on standard vector or text search. Images are re-ranked in re
 
 ```mermaid
 graph TD
-    subgraph Client [Client / Postman]
-        A[PDF Upload]
-        B[User Query]
+    subgraph Client [Client Interface]
+        A[PDF Document Upload]
+        B[User Chat Query]
     end
 
     subgraph Ingestion Pipeline
@@ -50,10 +64,12 @@ graph TD
         G[(GridFS Media)]
     end
 
-    subgraph Retrieval Pipeline
-        H[Weighted Text Search]
-        I[Keyword Relevance Scorer]
-        J[Gemini AI Generator]
+    subgraph Retrieval & Action Pipeline
+        H{Intent Router}
+        I[Weighted Text Search]
+        J[Keyword Relevance Scorer]
+        K[Gemini AI Generator]
+        L[Third-Party App Integrations]
     end
 
     A --> C
@@ -63,9 +79,12 @@ graph TD
     E -- "Store Binary" --> G
 
     B --> H
-    H -- "Fetch Context" --> I
-    I -- "Rank Media" --> J
-    J -- "Generate Payload" --> Client
+    H -- "General Knowledge" --> I
+    H -- "External Task" --> L
+    I -- "Fetch Context" --> J
+    J -- "Rank Media" --> K
+    K -- "Generate Payload" --> Client
+    L -- "Execute Action" --> Client
 ```
 
 ---
@@ -97,7 +116,7 @@ GOOGLE_API_KEY=your_gemini_api_key
 ```bash
 python server.py
 ```
-> The server will start on `http://localhost:8000`
+> The server will start locally on `http://localhost:8000`
 
 ---
 
