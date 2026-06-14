@@ -15,7 +15,6 @@ A professional-grade, scalable RAG pipeline engineered to handle multiple distin
 
 </div>
 ---
-
 ## ✨ Core Innovations
 
 ### 🏢 True Multi-Tenancy
