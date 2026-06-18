@@ -561,18 +561,95 @@ def list_projects(admin_id):
 
     return jsonify({"adminId": admin_id, "projects": projects})
 
+def _detect_user_language(query):
+    """
+    Deterministic language detection. Returns 'hindi', 'hinglish', or 'english'.
+    No LLM call — uses character analysis + a word-level Hinglish dictionary.
+    """
+    query_lower = query.strip().lower()
+
+    # 1. Non-ASCII characters → Hindi script (Devanagari, Arabic, etc.)
+    if any(ord(c) > 127 for c in query_lower):
+        return "hindi"
+
+    # 2. Known Hinglish words (Hindi words romanized in Latin script).
+    #    These words are unambiguously NOT English.
+    HINGLISH_WORDS = {
+        # Pronouns / particles
+        'mujhe', 'muje', 'mereko', 'mere', 'mera', 'meri', 'tumhara', 'tumhari',
+        'apna', 'apni', 'apne', 'uska', 'uski', 'unka', 'unki',
+        # Verbs
+        'chahiye', 'chahie', 'chaiye', 'karo', 'karna', 'karein', 'kardo',
+        'batao', 'bata', 'dikhao', 'dikha', 'dekho', 'dekhna', 'dedo',
+        'bolo', 'bolna', 'suno', 'sunao', 'jao', 'jana', 'aao', 'aana',
+        'lao', 'lelo', 'daal', 'daalo', 'hatao', 'nikalo', 'rakho',
+        'bhejo', 'mangao', 'lagao', 'chalo', 'ruko', 'btao',
+        # Question words
+        'kya', 'kaise', 'kab', 'kahan', 'kyun', 'kaun', 'kitna', 'kitne', 'kidhar',
+        # Common words
+        'hai', 'hain', 'tha', 'thi', 'hoga', 'hogi', 'nahi', 'nhi', 'nahin',
+        'haan', 'haa', 'ji', 'bas', 'mat', 'naa', 'bilkul', 'zaroor', 'zarur',
+        'acha', 'accha', 'achha', 'theek', 'thik', 'sahi',
+        'bohot', 'bahut', 'bahot', 'zyada', 'kam', 'thoda', 'thodi',
+        'lekin', 'magar', 'isliye', 'kyunki', 'toh', 'phir', 'abhi', 'aaj', 'kal',
+        'pehle', 'baad', 'wala', 'wali', 'wale',
+        'bhai', 'yaar', 'dost',
+        # Shopping context
+        'narangi', 'seb', 'sabzi', 'sabji', 'doodh', 'chawal', 'atta', 'dal',
+        'daal', 'paneer', 'tamatar', 'pyaaz', 'aloo', 'mirch', 'nimbu',
+        # Polite / greetings
+        'kripya', 'dhanyavad', 'shukriya', 'namaste', 'pranam',
+        # Numbers (Hindi)
+        'ek', 'teen', 'chaar', 'paanch', 'chhah', 'saat', 'aath', 'nau', 'das',
+    }
+
+    query_words = set(query_lower.split())
+    if query_words & HINGLISH_WORDS:
+        return "hinglish"
+
+    # 3. Default: English
+    return "english"
+
+
 def translate_action_response(text, query):
+    """
+    Translates a marketplace response to match the user's language.
+    Uses deterministic detection first — only calls the LLM if translation is needed.
+    """
+    lang = _detect_user_language(query)
+    print(f"  [TRANSLATE] Detected language: {lang} for query: '{query[:50]}'")
+
+    # English queries → return text as-is, no LLM call needed
+    if lang == "english":
+        return text
+
+    # Hindi or Hinglish → translate via LLM
     from phase2_retrieval.rag_logic import openai_client
+
+    if lang == "hinglish":
+        instruction = (
+            "Translate SOURCE_TEXT into casual Hinglish (Hindi words written in English/Latin letters). "
+            "NEVER use Devanagari script. Keep product names, prices, and emojis unchanged."
+        )
+    else:  # hindi
+        instruction = (
+            "Translate SOURCE_TEXT into Hindi (Devanagari script). "
+            "Keep product names, prices, and emojis unchanged."
+        )
+
     try:
-        translate_resp = openai_client.chat.completions.create(
+        resp = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a translation engine. Your task is to translate the SOURCE_TEXT into the EXACT SAME language and script as the USER_QUERY. If the query is Hinglish (Hindi written in English letters), translate the SOURCE_TEXT into casual, conversational Hinglish (using normal everyday words, DO NOT use pure or formal Hindi). DO NOT return or answer the USER_QUERY. Return ONLY the translated SOURCE_TEXT. Preserve all formatting, markdown, and emojis exactly."},
-                {"role": "user", "content": f"USER_QUERY: {query}\n\nSOURCE_TEXT:\n{text}"}
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": text}
             ],
             temperature=0.0,
         )
-        return translate_resp.choices[0].message.content.strip()
+        result_text = resp.choices[0].message.content.strip()
+        if result_text.startswith("OUTPUT:"):
+            result_text = result_text.replace("OUTPUT:", "", 1).strip()
+        return result_text
     except Exception as e:
         print(f"  [TRANSLATE] Failed to translate action response: {e}")
         return text
@@ -582,7 +659,8 @@ def core_chat_logic(data, admin, project_id):
     Shared core logic for both /chat/v2 and /chat/v3.
     """
     query = data['query']
-    raw_user_id = data.get('user_id')
+    phone = data.get('phone')
+    raw_user_id = data.get('user_id') or phone
     client_session_id = data.get('session_id')
     admin_id = admin["adminId"]
 
@@ -600,12 +678,18 @@ def core_chat_logic(data, admin, project_id):
     # ===== SECURE SESSION ALLOCATION =====
     # We maintain a common session ID throughout (created at first query step).
     # If client_session_id is provided, we continue to use it.
-    # Otherwise, we generate a new UUID-based session ID.
+    # Otherwise, we generate a deterministic UUID if a phone number is provided,
+    # or a random UUID if completely anonymous.
     if client_session_id:
         session_id = client_session_id
     else:
         import uuid
-        session_id = f"sess_{uuid.uuid4()}"
+        if phone:
+            NAMESPACE_PHONE = uuid.UUID('12345678-1234-5678-1234-567812345678')
+            generated_uuid = uuid.uuid5(NAMESPACE_PHONE, str(phone).strip().lower())
+            session_id = f"sess_{generated_uuid}"
+        else:
+            session_id = f"sess_{uuid.uuid4()}"
 
     # If raw_user_id (email/phone) is provided:
     #   We derive user_id from it via UUID5.
@@ -616,7 +700,7 @@ def core_chat_logic(data, admin, project_id):
     else:
         user_id = None
 
-    print(f"  [SESSION] Raw user: {raw_user_id} -> userId: {user_id}, sessionId: {session_id}")
+    print(f"  [SESSION] Phone: {phone} -> sessionId: {session_id}, userId: {user_id}")
 
     # Create or find the session
     session_obj = get_or_create_session(session_id, user_id, admin_id, project_id)
@@ -643,6 +727,7 @@ def core_chat_logic(data, admin, project_id):
                         "customerId": None
                     },
                     "marketplaceState": {"current_step": "idle"},
+                    "localCart": [],
                     "updatedAt": datetime.now(timezone.utc)
                 }
             }
@@ -736,10 +821,42 @@ def core_chat_logic(data, admin, project_id):
             if is_yes or is_no:
                 tenant_config = project_config
                 ai_text = translate_action_response(ai_text, query)
+                if wp_payload and isinstance(wp_payload, dict) and "media" in wp_payload and "body" in wp_payload["media"]:
+                    wp_payload["media"]["body"] = translate_action_response(wp_payload["media"]["body"], query)
                 save_chat_message(session_id, "user", query)
                 save_chat_message(session_id, "ai", ai_text)
                 base_url = request.host_url.rstrip('/')
                 return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+    # ===== GLOBAL GREETING INTERCEPTOR =====
+    # If the user says a simple greeting, we handle it directly rather than letting RAG fail.
+    is_greeting = query.strip().lower() in ["hi", "hello", "hey", "start", "menu", "/start", "hii", "hiii"]
+    if is_greeting:
+        from phase4_integrations.intent_router import get_connected_services
+        has_marketplace = any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
+        
+        if has_marketplace:
+            from phase4_integrations.marketplace_auth import check_marketplace_auth, update_marketplace_state
+            if not check_marketplace_auth(session_obj):
+                # User isn't logged in — force the auth flow
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_email",
+                    "pending_action": None,
+                    "pending_parameters": None,
+                })
+                ai_text = (
+                    "To help you with shopping, I need to verify your identity first.\n\n"
+                    "Please share your *email address* to get started."
+                )
+            else:
+                # User is already logged in
+                ai_text = "Hello! 👋 You are logged in and ready to shop. What are you looking for today?"
+
+            tenant_config = project_config
+            ai_text = translate_action_response(ai_text, query)
+            save_chat_message(session_id, "user", query)
+            save_chat_message(session_id, "ai", ai_text)
+            base_url = request.host_url.rstrip('/')
+            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
 
     # ===== PHASE 4: INTENT ROUTING (Action vs RAG) =====
     from phase4_integrations.intent_router import route_intent
@@ -773,6 +890,8 @@ def core_chat_logic(data, admin, project_id):
         tenant_config = project_config
 
         ai_text = translate_action_response(ai_text, query)
+        if wp_payload and isinstance(wp_payload, dict) and "media" in wp_payload and "body" in wp_payload["media"]:
+            wp_payload["media"]["body"] = translate_action_response(wp_payload["media"]["body"], query)
 
         # Save Turn
         save_chat_message(session_id, "user", query)
@@ -780,6 +899,30 @@ def core_chat_logic(data, admin, project_id):
 
         base_url = request.host_url.rstrip('/')
         return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+    # ===== GLOBAL AUTH GATE FOR MARKETPLACE BOTS =====
+    # Catch any query that fell through to RAG. If marketplace is connected,
+    # the user MUST be logged in to chat.
+    from phase4_integrations.intent_router import get_connected_services
+    has_marketplace = any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
+    
+    if has_marketplace:
+        from phase4_integrations.marketplace_auth import check_marketplace_auth, update_marketplace_state
+        if not check_marketplace_auth(session_obj):
+            update_marketplace_state(session_id, {
+                "current_step": "awaiting_email",
+                "pending_action": None,
+                "pending_parameters": None,
+            })
+            ai_text = (
+                "To help you with shopping, I need to verify your identity first.\n\n"
+                "Please share your *email address* to get started."
+            )
+            tenant_config = project_config
+            ai_text = translate_action_response(ai_text, query)
+            save_chat_message(session_id, "user", query)
+            save_chat_message(session_id, "ai", ai_text)
+            base_url = request.host_url.rstrip('/')
+            return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
 
     # ===== STANDARD RAG FLOW =====
 

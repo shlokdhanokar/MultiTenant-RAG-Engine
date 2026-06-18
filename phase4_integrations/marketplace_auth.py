@@ -428,85 +428,53 @@ def fetch_user_profile(session, session_id):
 def execute_confirmed_cart_add(session, session_id, pending_cart):
     """
     Called when the user confirms "Yes" to the add-to-cart prompt.
-    Fires the real cart API call using the pre-resolved parameters
-    saved in the session's marketplaceState.pending_cart.
+    Saves the item to the LOCAL session-scoped cart (not the marketplace API).
+    The marketplace cart API is only called during checkout.
     """
-    print(f"  [MARKETPLACE] Executing confirmed add_to_cart for: {pending_cart.get('product_name')}")
+    from database import add_to_local_cart
+    print(f"  [MARKETPLACE] Adding to LOCAL cart: {pending_cart.get('product_name')}")
 
-    # Get authenticated headers
-    success, headers = get_marketplace_token(session)
-    if not success:
-        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
-        return {
-            "success": False,
-            "message": "Sorry, your login session expired. Please log in again.",
-        }
+    product_name = pending_cart.get("product_name", "item")
+    quantity = pending_cart.get("quantity", 1)
+    price = pending_cart.get("product_price", 0.0)
 
-    config = load_marketplace_config()
-    base_url = config.get("base_url", "").rstrip("/")
-    endpoint = f"{base_url}/user/cart/add"
-
-    # Build the API payload from the saved pending_cart
-    api_payload = {
+    # Build local cart item
+    cart_item = {
         "productId": pending_cart.get("productId"),
         "productVarientUomId": pending_cart.get("productVarientUomId"),
-        "quantity": pending_cart.get("quantity", 1),
+        "name": product_name,
+        "price": price,
+        "quantity": quantity,
         "storeId": pending_cart.get("storeId"),
         "customerId": pending_cart.get("customerId"),
         "customerPhone": pending_cart.get("customerPhone"),
     }
 
-    print(f"  [MARKETPLACE] Cart API Payload: {api_payload}")
+    add_to_local_cart(session_id, cart_item)
 
-    try:
-        resp = requests.post(endpoint, headers=headers, json=api_payload, timeout=15)
-        print(f"  [MARKETPLACE] Cart API Response: {resp.status_code}")
+    # Reset state
+    update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
 
-        # Reset state regardless of outcome
-        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
+    price_str = f" — ${price:.2f}" if price else ""
+    final_message = f"✅ *Added to Cart!*\n\n"
+    final_message += f"🛒 *{product_name}* x {quantity}{price_str}\n\n"
 
-        if resp.status_code < 300:
-            product_name = pending_cart.get("product_name", "item")
-            quantity = pending_cart.get("quantity", 1)
-            price = pending_cart.get("product_price", 0)
-            price_str = f" — ${price:.2f}" if price else ""
-
-            final_message = f"✅ *Added to Cart!*\n\n"
-            final_message += f"🛒 *{product_name}* x {quantity}{price_str}\n\n"
-
-            return {
-                "success": True,
-                "message": final_message,
-                "whatsapp_payload": {
-                    "type": "session_quick_reply_with_text",
-                    "media": {
-                        "header": {"text": ""},
-                        "body": final_message.strip(),
-                        "footer_text": "",
-                        "button": [
-                            {"id": "view_cart", "title": "View Cart 🛒"},
-                            {"id": "continue_shopping", "title": "Keep Shopping"},
-                        ]
-                    }
-                }
+    return {
+        "success": True,
+        "message": final_message,
+        "whatsapp_payload": {
+            "type": "session_quick_reply_with_text",
+            "media": {
+                "header": {"text": ""},
+                "body": final_message.strip(),
+                "footer_text": "",
+                "button": [
+                    {"id": "view_cart", "title": "View Cart 🛒"},
+                    {"id": "continue_shopping", "title": "Keep Shopping"},
+                ]
             }
-        else:
-            try:
-                error_data = resp.json()
-                error_msg = error_data.get("message", error_data.get("error", resp.text[:200]))
-            except Exception:
-                error_msg = resp.text[:200]
-            return {
-                "success": False,
-                "message": f"Sorry, I couldn't add the item to your cart. The marketplace said: *{error_msg}*",
-            }
-
-    except requests.RequestException as e:
-        update_marketplace_state(session_id, {"current_step": "idle", "pending_cart": None})
-        return {
-            "success": False,
-            "message": f"Sorry, I couldn't reach the marketplace right now. Please try again.",
         }
+    }
 
 
 def handle_marketplace_action(session, session_id, action_id, parameters):
@@ -663,46 +631,40 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
         # Inject productVarientUomId from cache if not provided
         if not parameters.get("productVarientUomId"):
             cached_uom_id = resolved_product.get("productVarientUomId") if resolved_product else None
-            print(f"  [MARKETPLACE] Cart DEBUG: cached_uom_id = {cached_uom_id}")
+            
             if cached_uom_id:
                 parameters["productVarientUomId"] = cached_uom_id
                 print(f"  [MARKETPLACE] Cart: Injected cached productVarientUomId {cached_uom_id}")
             else:
-                # Fallback: search the product by name using listv4
-                resolved_pid = parameters.get("productId", "")
-                prod_name = resolved_product.get("name", "") if resolved_product else ""
-                print(f"  [MARKETPLACE] Cart: No cached variant ID for {resolved_pid} ({prod_name}), fetching via listv4...")
+                print(f"  [MARKETPLACE] Cart: Variant missing, starting robust listv4 fetch...")
+                search_key = resolved_product.get("name", prod_id_param) if resolved_product else prod_id_param
                 try:
                     search_url = f"{config.get('base_url', '').rstrip('/')}/user/product/listv4"
-                    search_payload = {
-                        "storeId": config.get("default_store_id"),
-                        "searchKey": prod_name,
-                        "limit": 10
-                    }
+                    search_payload = {"storeId": config.get("default_store_id"), "searchKey": search_key, "limit": 5}
                     search_resp = requests.post(search_url, headers=headers, json=search_payload, timeout=10)
                     if search_resp.status_code < 300:
-                        search_data = search_resp.json().get("data", {})
-                        rows = search_data.get("rows", [])
-                        
-                        # Find the matching product in the results
-                        matched = next((r for r in rows if (r.get("id") or r.get("uuid") or r.get("productId")) == resolved_pid), None)
-                        if not matched and rows:
-                            matched = rows[0]  # Fallback to the first result if ID doesn't match
-                            
-                        if matched:
-                            varients = matched.get("varients", [])
-                            if varients and varients[0].get("productVarientUoms"):
-                                uom = varients[0]["productVarientUoms"][0]
-                                parameters["productVarientUomId"] = uom["id"]
-                                print(f"  [MARKETPLACE] Cart: Fetched productVarientUomId {uom['id']} via listv4")
-                            else:
-                                print(f"  [MARKETPLACE] Cart: Product has no variants/UOMs!")
-                        else:
-                            print(f"  [MARKETPLACE] Cart: Product not found in listv4 results!")
-                    else:
-                        print(f"  [MARKETPLACE] Cart: Product search failed with status {search_resp.status_code}")
+                        rows = search_resp.json().get("data", {}).get("rows", [])
+                        if rows:
+                            matched = rows[0]
+                            real_id = matched.get("id") or matched.get("uuid") or matched.get("productId")
+                            parameters["productId"] = real_id
+                            resolved_product = matched
                 except Exception as e:
-                    print(f"  [MARKETPLACE] Cart: Failed to fetch variant: {e}")
+                    print(f"  [MARKETPLACE] Cart: Failed listv4 search: {e}")
+                
+                # Extract variants from the resolved product (which is now the full API object)
+                if resolved_product:
+                    variants = resolved_product.get("varients") or resolved_product.get("variants") or resolved_product.get("productVariants") or []
+                    if variants:
+                        first_v = variants[0]
+                        uoms = first_v.get("productVarientUoms") or first_v.get("productVariantUoms") or []
+                        if uoms:
+                            parameters["productVarientUomId"] = uoms[0].get("id") or uoms[0].get("productVarientUomId")
+                        else:
+                            parameters["productVarientUomId"] = first_v.get("productVarientUomId") or first_v.get("id")
+                        print(f"  [MARKETPLACE] Cart: Successfully extracted variant {parameters.get('productVarientUomId')} from resolved product.")
+                    else:
+                        print(f"  [MARKETPLACE] Cart: Product genuinely has no variants in the catalog data.")
 
         # If productVarientUomId is still missing, return an error early
         if action_id == "add_to_cart" and not parameters.get("productVarientUomId"):
@@ -721,9 +683,21 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
         product_name = "item"
         product_price = 0.0
         if resolved_product:
-            product_name = resolved_product.get("name", "item")
+            # Robust name extraction
+            langs = resolved_product.get("productLanguages", [])
+            product_name = langs[0].get("name") if langs else (resolved_product.get("name") or resolved_product.get("title") or "item")
+            
+            # Robust price extraction
+            price_val = resolved_product.get("price") or resolved_product.get("sellingPrice") or resolved_product.get("mrp")
+            if not price_val:
+                varients = resolved_product.get("variants") or resolved_product.get("varients", [])
+                if varients:
+                    uoms = varients[0].get("productVariantUoms") or varients[0].get("productVarientUoms")
+                    if uoms:
+                        price_val = uoms[0].get("inventory", {}).get("price", 0)
+
             try:
-                product_price = float(resolved_product.get("price", 0))
+                product_price = float(price_val or 0)
             except (ValueError, TypeError):
                 product_price = 0.0
 
@@ -768,26 +742,107 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
             }
         }
 
-    # ── Cart: view_cart — strip storeId since the API rejects it ──
+    # ── Cart: view_cart — use LOCAL session-scoped cart ──
     if action_id == "view_cart":
-        parameters.pop("storeId", None)
+        from database import get_local_cart
+        cart = get_local_cart(session_id)
+
+        if not cart:
+            return {
+                "success": True,
+                "message": "🛒 Your cart is empty! Search for products to start shopping.",
+            }
+
+        total = 0.0
+        final_message = "🛒 *Your Shopping Cart*\n\n"
+        cached_cart = []
+
+        for idx, item in enumerate(cart, 1):
+            item_name = item.get("name", "Unknown Item")
+            item_price = float(item.get("price", 0))
+            qty = float(item.get("quantity", 1))
+            line_total = item_price * qty
+            total += line_total
+
+            final_message += f"*{idx}. {item_name}*\n"
+            final_message += f"   Qty: {qty:g} | Price: ${item_price:.2f} | Subtotal: ${line_total:.2f}\n\n"
+
+            cached_cart.append({
+                "cartItemId": item.get("cartItemId"),
+                "name": item_name,
+                "quantity": qty,
+                "price": item_price,
+            })
+
+        final_message += f"💰 *Total: ${total:.2f}*\n\n"
+        final_message += "To remove an item, say *'Remove item 1'*\n"
+        final_message += "To checkout, say *'Place my order'*"
+
+        # Cache for remove_from_cart index resolution
+        update_marketplace_state(session_id, {"last_cart_shown": cached_cart})
+
+        return {
+            "success": True,
+            "message": final_message,
+        }
+
+    # ── Cart: remove_from_cart — use LOCAL session-scoped cart ──
+    if action_id == "remove_from_cart":
+        from database import remove_from_local_cart
+        cart_id_param = parameters.get("cartId", "")
+        try:
+            idx = int(str(cart_id_param).strip())
+        except (ValueError, TypeError):
+            idx = 0
+
+        removed = remove_from_local_cart(session_id, idx)
+        if removed:
+            return {
+                "success": True,
+                "message": f"🗑️ *Removed '{removed.get('name', 'item')}' from your cart.*\n\nSay *'View my cart'* to see your updated cart.",
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Could not find item #{idx} in your cart. Say *'View my cart'* to see your items.",
+            }
+
+    # ── Cart: update_cart_quantity — use LOCAL session-scoped cart ──
+    if action_id == "update_cart_quantity":
+        from database import update_local_cart_quantity
+        cart_id_param = parameters.get("cartId", "")
+        qty_param = parameters.get("quantity", 1)
+        
+        try:
+            idx = int(str(cart_id_param).strip())
+        except (ValueError, TypeError):
+            idx = 0
+            
+        try:
+            new_qty = float(qty_param)
+        except (ValueError, TypeError):
+            new_qty = 1.0
+
+        updated = update_local_cart_quantity(session_id, idx, new_qty)
+        if updated:
+            if new_qty <= 0:
+                msg = f"🗑️ *Removed '{updated.get('name', 'item')}' from your cart.*\n\nSay *'View my cart'* to see your updated cart."
+            else:
+                msg = f"✅ *Updated '{updated.get('name', 'item')}' quantity to {new_qty:g}.*\n\nSay *'View my cart'* to see your updated cart."
+                
+            return {
+                "success": True,
+                "message": msg,
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Could not find item #{idx} in your cart. Say *'View my cart'* to see your items.",
+            }
 
     # ── Orders: list_orders — strip customerId since the API rejects it ──
     if action_id == "list_orders":
         parameters.pop("customerId", None)
-
-    # ── Cart: remove_from_cart — resolve cart item index to cartId ──
-    if action_id == "remove_from_cart":
-        cart_id_param = parameters.get("cartId", "")
-        try:
-            idx = int(str(cart_id_param).strip())
-            marketplace_state = session.get("marketplaceState", {})
-            last_cart = marketplace_state.get("last_cart_shown", [])
-            if last_cart and 0 < idx <= len(last_cart):
-                parameters["cartId"] = last_cart[idx - 1].get("cartId")
-                print(f"  [MARKETPLACE] Cart: Resolved cart index {idx} to cartId {parameters['cartId']}")
-        except (ValueError, TypeError):
-            pass
 
     # Run it!
     method = action_schema.get("method", "GET").upper()
@@ -853,15 +908,26 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
                 p_name = langs[0].get("name") if langs else (p.get("name") or p.get("title") or "Unnamed Product")
                 
                 # Extract variant UOM ID and price from the nested structure
-                varients = p.get("varients", [])
+                varients = p.get("variants") or p.get("varients") or p.get("productVarientUoms") or p.get("productVariants") or []
                 p_variant_uom_id = None
                 p_company_id = None
-                if varients and varients[0].get("productVarientUoms"):
-                    uom = varients[0]["productVarientUoms"][0]
-                    p_variant_uom_id = uom.get("id")
-                    inventory = uom.get("inventory", {})
-                    p_price = inventory.get("price", 0.0)
-                    p_company_id = inventory.get("companyId")
+                
+                if varients:
+                    first_v = varients[0]
+                    uoms = first_v.get("productVariantUoms") or first_v.get("productVarientUoms")
+                    if uoms:
+                        uom = uoms[0]
+                        p_variant_uom_id = uom.get("id") or uom.get("productVarientUomId") or uom.get("uuid")
+                        inventory = uom.get("inventory", {})
+                        p_price = inventory.get("price", 0.0)
+                        p_company_id = inventory.get("companyId")
+                    else:
+                        p_variant_uom_id = first_v.get("productVarientUomId") or first_v.get("id") or first_v.get("uuid")
+                        inventory = first_v.get("inventory", {})
+                        p_price = inventory.get("price") or first_v.get("sellingPrice") or first_v.get("price") or 0.0
+                        p_company_id = inventory.get("companyId")
+                        if not p_price:
+                            p_price = p.get("sellingPrice") or p.get("price") or p.get("mrp") or 0.0
                 else:
                     p_price = p.get("sellingPrice") or p.get("price") or p.get("mrp") or 0.0
                 cached_products.append({
@@ -976,138 +1042,6 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
                     final_message += f"   ID: `{cat_id}`\n"
                     final_message += f"   _{cat_desc}_\n\n"
                 final_message += "Select one of the categories to start shopping!"
-
-        elif action_id == "add_to_cart":
-            # Parse success response
-            cart_data = resp_data.get("data", resp_data)
-            product_name = parameters.get("productId", "item")
-            quantity = parameters.get("quantity", 1)
-
-            # Try to resolve the product name from our cached products
-            marketplace_state = session.get("marketplaceState", {})
-            last_products = marketplace_state.get("last_products_shown", [])
-            for p in last_products:
-                if p.get("productId") == parameters.get("productId"):
-                    product_name = p.get("name", product_name)
-                    break
-
-            price_val = 0.0
-            for p in last_products:
-                if p.get("productId") == parameters.get("productId"):
-                    try:
-                        price_val = float(p.get("price", 0))
-                    except (ValueError, TypeError):
-                        pass
-                    break
-
-            final_message = f"✅ *Added to Cart!*\n\n"
-            final_message += f"🛒 *{product_name}* x {quantity}"
-            if price_val:
-                final_message += f" — ${price_val:.2f}"
-            final_message += "\n\n"
-
-            whatsapp_payload = {
-                "type": "session_quick_reply_with_text",
-                "media": {
-                    "header": {"text": ""},
-                    "body": final_message.strip(),
-                    "footer_text": "",
-                    "button": [
-                        {"id": "view_cart", "title": "View Cart 🛒"},
-                        {"id": "continue_shopping", "title": "Keep Shopping"},
-                    ]
-                }
-            }
-
-        elif action_id == "view_cart":
-            cart_data = resp_data.get("data", resp_data)
-            cart_items = []
-            if isinstance(cart_data, list):
-                cart_items = cart_data
-            elif isinstance(cart_data, dict):
-                cart_items = cart_data.get("rows", cart_data.get("items", cart_data.get("cartItems", [])))
-
-            if not cart_items:
-                final_message = "🛒 Your cart is empty! Search for products to start shopping."
-            else:
-                import json
-                print("\n=== CART ITEMS DEBUG ===")
-                try:
-                    print(json.dumps(cart_items, indent=2))
-                except Exception as e:
-                    print(cart_items)
-                print("========================\n")
-                
-                # Cache cart items for remove_from_cart index resolution
-                cached_cart = []
-                total = 0.0
-                final_message = "🛒 *Your Shopping Cart*\n\n"
-
-                for idx, item in enumerate(cart_items, 1):
-                    cart_id = item.get("id") or item.get("cartId") or item.get("_id")
-                    qty = item.get("quantity", 1)
-
-                    # Extract product name from nested structure
-                    product = item.get("product", {})
-                    p_langs = product.get("productLanguages", [])
-                    item_name = p_langs[0].get("name") if p_langs else (product.get("name") or item.get("productName") or "Unknown Item")
-
-                    # Extract price from multiple possible locations in the hierarchy
-                    item_price = item.get("price") or item.get("unitPrice", 0)
-                    
-                    if not item_price:
-                        # Try priceInfo level (this is the correct one for cart API)
-                        item_price = item.get("priceInfo", {}).get("price", 0)
-                        
-                    if not item_price:
-                        # Try inventory level
-                        inv = item.get("inventory", {})
-                        item_price = inv.get("price", 0)
-                    
-                    if not item_price:
-                        # Try product level (based on developer feedback)
-                        item_price = product.get("price") or product.get("mrp") or product.get("sellingPrice", 0)
-                        
-                    if not item_price:
-                        # Try nested varient level
-                        varients = product.get("varients", [])
-                        if varients and varients[0].get("productVarientUoms"):
-                            uom = varients[0]["productVarientUoms"][0]
-                            item_price = uom.get("inventory", {}).get("price", 0)
-
-                    try:
-                        item_price = float(item_price)
-                        qty_num = float(qty)
-                    except (ValueError, TypeError):
-                        item_price = 0.0
-                        qty_num = 1.0
-
-                    line_total = item_price * qty_num
-                    total += line_total
-
-                    final_message += f"*{idx}. {item_name}*\n"
-                    final_message += f"   Qty: {qty} | Price: ${item_price:.2f} | Subtotal: ${line_total:.2f}\n\n"
-
-                    cached_cart.append({
-                        "cartId": cart_id,
-                        "name": item_name,
-                        "quantity": qty,
-                        "price": item_price,
-                    })
-
-                final_message += f"💰 *Total: ${total:.2f}*\n\n"
-                final_message += "To remove an item, say *'Remove item 1'*\n"
-                final_message += "To checkout, say *'Place my order'*"
-
-                # Cache cart items in session
-                update_marketplace_state(session_id, {"last_cart_shown": cached_cart})
-                if "marketplaceState" not in session:
-                    session["marketplaceState"] = {}
-                session["marketplaceState"]["last_cart_shown"] = cached_cart
-
-        elif action_id == "remove_from_cart":
-            final_message = "🗑️ *Item removed from your cart.*\n\n"
-            final_message += "Say *'View my cart'* to see your updated cart."
 
         elif action_id == "list_orders":
             orders = exec_result.get("data", {}).get("data", {}).get("rows", [])

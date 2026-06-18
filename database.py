@@ -246,6 +246,101 @@ def clear_marketplace_state(session_id):
     )
 
 
+# ===== LOCAL SESSION-SCOPED CART =====
+
+def get_local_cart(session_id):
+    """Returns the local cart items for this session. Cart is tied to session_id, not customer account."""
+    sessions = db["chathistories"]
+    session = sessions.find_one({"sessionId": session_id})
+    if not session:
+        return []
+    return session.get("localCart", [])
+
+
+def add_to_local_cart(session_id, item):
+    """
+    Adds an item to the session's local cart.
+    item should be a dict with: productId, name, price, quantity, productVarientUomId, storeId, companyId
+    If the same productVarientUomId already exists, increment the quantity.
+    """
+    from datetime import datetime, timezone
+    sessions = db["chathistories"]
+    cart = get_local_cart(session_id)
+
+    # Check if item already exists in cart (by productVarientUomId)
+    uom_id = item.get("productVarientUomId")
+    existing = next((c for c in cart if c.get("productVarientUomId") == uom_id), None)
+
+    if existing:
+        existing["quantity"] = existing.get("quantity", 1) + item.get("quantity", 1)
+        sessions.update_one(
+            {"sessionId": session_id},
+            {"$set": {"localCart": cart, "updatedAt": datetime.now(timezone.utc)}}
+        )
+    else:
+        # Generate a local cart item ID
+        import uuid
+        item["cartItemId"] = str(uuid.uuid4())
+        sessions.update_one(
+            {"sessionId": session_id},
+            {
+                "$push": {"localCart": item},
+                "$set": {"updatedAt": datetime.now(timezone.utc)}
+            }
+        )
+
+
+def remove_from_local_cart(session_id, index):
+    """
+    Removes an item from the local cart by 1-based index.
+    Returns the removed item or None.
+    """
+    from datetime import datetime, timezone
+    sessions = db["chathistories"]
+    cart = get_local_cart(session_id)
+
+    if 0 < index <= len(cart):
+        removed = cart.pop(index - 1)
+        sessions.update_one(
+            {"sessionId": session_id},
+            {"$set": {"localCart": cart, "updatedAt": datetime.now(timezone.utc)}}
+        )
+        return removed
+    return None
+
+
+def update_local_cart_quantity(session_id, index, new_quantity):
+    """
+    Updates the quantity of an item in the local cart by 1-based index.
+    Returns the updated item or None.
+    """
+    from datetime import datetime, timezone
+    sessions = db["chathistories"]
+    cart = get_local_cart(session_id)
+
+    if 0 < index <= len(cart):
+        if new_quantity <= 0:
+            return remove_from_local_cart(session_id, index)
+            
+        cart[index - 1]["quantity"] = float(new_quantity)
+        sessions.update_one(
+            {"sessionId": session_id},
+            {"$set": {"localCart": cart, "updatedAt": datetime.now(timezone.utc)}}
+        )
+        return cart[index - 1]
+    return None
+
+
+def clear_local_cart(session_id):
+    """Empties the entire local cart for this session."""
+    from datetime import datetime, timezone
+    sessions = db["chathistories"]
+    sessions.update_one(
+        {"sessionId": session_id},
+        {"$set": {"localCart": [], "updatedAt": datetime.now(timezone.utc)}}
+    )
+
+
 def log_api_call(log_data):
     """
     Log an API request (incoming or outgoing) to the api_logs collection.

@@ -121,6 +121,15 @@ MARKETPLACE_SERVICE = {
             "parameters": ["cartId"],
             "requiresAuth": True,
         },
+        {
+            "actionId": "update_cart_quantity",
+            "actionName": "Update Cart Quantity",
+            "description": "Increase or decrease the quantity of an existing item in the user's cart. Provide the cartId (1-based index) and the new quantity.",
+            "method": "POST",
+            "endpoint": "user/cart/edit",
+            "parameters": ["cartId", "quantity"],
+            "requiresAuth": True,
+        },
 
         # ── Orders ──
         {
