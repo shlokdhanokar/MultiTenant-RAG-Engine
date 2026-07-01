@@ -14,10 +14,7 @@ A professional-grade, scalable RAG pipeline engineered to handle multiple distin
 [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
 </div>
---
-
-
-
+-
 ## ✨ Core Innovations
 
 ### 🏢 True Multi-Tenancy
