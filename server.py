@@ -110,6 +110,17 @@ def init_gridfs_bucket():
 
 fs = init_gridfs_bucket()
 
+# Open provider connections in the background at import time. Cold start costs
+# ~13s (TLS handshake plus SDK client construction) and would otherwise be paid
+# by the first visitor's first question. Threaded so it never delays boot or
+# blocks a health check, and failures inside are logged rather than raised.
+def _start_prewarm():
+    import threading
+    from llm_client import prewarm
+    threading.Thread(target=prewarm, name="llm-prewarm", daemon=True).start()
+
+_start_prewarm()
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 

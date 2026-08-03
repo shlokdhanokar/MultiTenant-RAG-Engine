@@ -35,6 +35,7 @@ EMBEDDING_DIMENSIONS = int(os.getenv("GEMINI_EMBEDDING_DIMENSIONS", "1536"))
 CHAT_MODEL = GROQ_CHAT_MODEL if PROVIDER == "groq" else GEMINI_CHAT_MODEL
 
 _gemini_client = None
+_groq_session = None
 
 
 class LLMError(Exception):
@@ -76,6 +77,49 @@ def _gemini():
     return _gemini_client
 
 
+def _groq_http():
+    """
+    A module-level Session so the TLS connection is reused across calls.
+    A fresh `requests.post` renegotiates TLS every time, which on a
+    high-latency link costs more than the generation itself.
+    """
+    global _groq_session
+    if _groq_session is None:
+        import requests
+        _groq_session = requests.Session()
+    return _groq_session
+
+
+def prewarm():
+    """
+    Establish provider connections at startup rather than on the first user
+    request. Cold start costs ~13s (TLS handshake plus client construction),
+    and the request that pays it is the first one a visitor makes — the worst
+    possible one to be slow. Safe to call more than once; failures are logged
+    and swallowed so a provider being briefly unreachable can't stop boot.
+    """
+    try:
+        t = time.perf_counter()
+        embed("warmup", task_type="RETRIEVAL_QUERY", operation="Prewarm Embedding")
+        logger.info(f"  [PREWARM] embeddings ready in {(time.perf_counter() - t) * 1000:.0f}ms")
+    except Exception as e:
+        logger.warning(f"  [PREWARM] embedding warmup failed (non-fatal): {e}")
+
+    if PROVIDER == "groq":
+        try:
+            t = time.perf_counter()
+            api_key = os.getenv("GROQ_API_KEY")
+            if api_key:
+                _groq_http().get(
+                    f"{GROQ_BASE_URL}/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=30,
+                )
+                logger.info(f"  [PREWARM] groq ready in {(time.perf_counter() - t) * 1000:.0f}ms")
+        except Exception as e:
+            logger.warning(f"  [PREWARM] groq warmup failed (non-fatal): {e}")
+
+
 def _usage(model, input_tokens, output_tokens, total_tokens=None):
     from token_logger import estimate_cost
     return {
@@ -95,8 +139,6 @@ def _groq_call(system_instruction, contents, temperature, max_output_tokens, jso
     rather than through an SDK — the surface used here (messages, JSON mode,
     tools) is small and stable, and `requests` is already a dependency.
     """
-    import requests
-
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise LLMError("GROQ_API_KEY not set")
@@ -126,7 +168,7 @@ def _groq_call(system_instruction, contents, temperature, max_output_tokens, jso
         ]
         payload["tool_choice"] = "auto"
 
-    resp = requests.post(
+    resp = _groq_http().post(
         f"{GROQ_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=payload,
