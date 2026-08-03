@@ -3,9 +3,22 @@ services:
     name: rag-engine
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    # 'free' spins the instance down after ~15 minutes idle, so the next
+    # visitor waits for a container boot before the app even starts warming.
+    # Move to 'starter' if the demo is being actively shared.
+    plan: free
     healthCheckPath: /health
     envVars:
+      # Must be the deployed API's own https URL. Image links are HMAC-signed
+      # against it, so leaving the localhost default serves links no browser
+      # outside this machine can load.
+      - key: APP_BASE_URL
+        sync: false
+      # Comma-separated origins allowed to call /api/demo/* — set to the UI's
+      # deployed origin. Defaults to "*", which is fine for a public demo but
+      # worth narrowing.
+      - key: CORS_ORIGINS
+        value: "*"
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DB_NAME
@@ -33,8 +46,6 @@ services:
         value: "false"
       - key: MAX_API_KEYS_LIMIT
         value: "5"
-      - key: APP_BASE_URL
-        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
