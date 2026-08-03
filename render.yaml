@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: rag-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_CHAT_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: GEMINI_EMBEDDING_DIMENSIONS
+        value: "1536"
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: IMAGE_URL_SIGNING_SECRET
+        sync: false
+      - key: MARKETPLACE_ENABLED
+        value: "false"
+      - key: MAX_API_KEYS_LIMIT
+        value: "5"
+      - key: APP_BASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SHOPIFY_CLIENT_ID
+        sync: false
+      - key: SHOPIFY_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: CALENDLY_CLIENT_ID
+        sync: false
+      - key: CALENDLY_CLIENT_SECRET
+        sync: false

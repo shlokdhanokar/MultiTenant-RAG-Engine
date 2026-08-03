@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def group_content_by_topic(tagged_blocks):
     """
     Aggregate all paragraph text into hierarchical topics (Heading + Subheading).
@@ -162,7 +167,7 @@ def map_images_to_chunks(chunks, uploaded_images):
         
         if current_owner not in image_to_topic: image_to_topic[current_owner] = []
         image_to_topic[current_owner].append(img["gridfs_id"])
-        print(f"  [MAP] Image on P{img_page} at Y{img_y:.0f} -> {current_owner}")
+        logger.info(f"  [MAP] Image on P{img_page} at Y{img_y:.0f} -> {current_owner}")
 
     for chunk in chunks:
         chunk["associated_image_ids"] = image_to_topic.get(chunk["header"], [])

@@ -4,9 +4,13 @@ import time
 import uuid
 import secrets
 import hashlib
+import hmac
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, request, jsonify, abort, Response
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ===== MIDDLEWARE DECORATORS =====
 
@@ -58,9 +62,7 @@ from pymongo import MongoClient
 from gridfs import GridFS
 from dotenv import load_dotenv
 import bson
-from openai import OpenAI
 
-from phase1_upload.pdf_parser import analyze_document_layout
 from phase1_upload.chunker import group_content_by_topic, generate_semantic_chunks, map_images_to_chunks
 from phase2_retrieval.rag_logic import generate_text_embedding
 from database import perform_semantic_retrieval
@@ -68,17 +70,34 @@ from database import perform_semantic_retrieval
 # Load environment variables from .env in this folder
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
+from logging_config import setup_logging
+setup_logging()
+
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
     raise RuntimeError("MONGODB_URI not set in .env")
 
-# Configure OpenAI client
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+IMAGE_URL_SIGNING_SECRET = os.getenv("IMAGE_URL_SIGNING_SECRET")
+if not IMAGE_URL_SIGNING_SECRET:
+    raise RuntimeError(
+        "IMAGE_URL_SIGNING_SECRET not set in .env (generate with: "
+        "python -c \"import secrets; print(secrets.token_hex(32))\")"
+    )
+IMAGE_URL_TTL_SECONDS = 24 * 60 * 60  # signed image links expire after 24h
+
+if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+    raise RuntimeError("GEMINI_API_KEY not set in .env")
 
 # MongoDB connection and GridFS bucket
 client = MongoClient(MONGODB_URI)
 DB_NAME = os.getenv("MONGODB_DB_NAME", "rag_db")
 db = client[DB_NAME]
+
+# Marketplace/checkout belongs to a separate app and is disabled while this
+# repo focuses on the core RAG platform. Code is kept intact (not deleted) so
+# it can be re-enabled by flipping this flag. See phase4_integrations/marketplace_auth.py,
+# phase4_integrations/marketplace_service.py, checkout_states.py.
+MARKETPLACE_ENABLED = os.getenv("MARKETPLACE_ENABLED", "false").strip().lower() == "true"
 
 
 def init_gridfs_bucket():
@@ -92,6 +111,29 @@ def init_gridfs_bucket():
 fs = init_gridfs_bucket()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
+
+# The demo UI is served from a different origin (Vite in dev, static host in
+# prod), so the browser needs explicit permission to call the API.
+from flask_cors import CORS
+CORS(
+    app,
+    resources={r"/api/demo/*": {"origins": os.getenv("CORS_ORIGINS", "*").split(",")}},
+)
+
+# ===== RATE LIMITING =====
+# In-memory storage is fine for a single-instance deployment; if this ever
+# scales to multiple app instances, switch storage_uri to a shared Redis URL
+# so limits are enforced across instances instead of per-process.
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["200 per hour"],
+    storage_uri="memory://",
+)
 
 # ===== GLOBAL REQUEST LOGGING =====
 from database import log_api_call
@@ -182,39 +224,44 @@ requests.Session.request = logged_request
 
 # ===== TOKEN USAGE MONITORING =====
 
-def log_token_usage(operation, model, usage):
+# ==========================================
+# PHASE 5: Payment Webhook
+# ==========================================
+
+@app.route('/api/payment/webhook', methods=['POST'])
+def verify_payment_webhook():
     """
-    Log token usage and estimated cost after every OpenAI API call.
-    Helps monitor spend and optimize token consumption.
+    Background listener function that receives callbacks from the payment gateway
+    to confirm whether the user's transaction was successful or failed.
     """
-    # Pricing per 1M tokens (as of May 2026)
-    PRICING = {
-        "text-embedding-3-small": {"input": 0.02},
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    }
-    
-    model_pricing = PRICING.get(model, {"input": 0.0, "output": 0.0})
-    
-    input_tokens = getattr(usage, 'prompt_tokens', 0) or getattr(usage, 'total_tokens', 0)
-    output_tokens = getattr(usage, 'completion_tokens', 0)
-    total_tokens = getattr(usage, 'total_tokens', 0)
-    
-    input_cost = (input_tokens / 1_000_000) * model_pricing.get("input", 0)
-    output_cost = (output_tokens / 1_000_000) * model_pricing.get("output", 0)
-    total_cost = input_cost + output_cost
-    
-    print(f"  [TOKENS] {operation} | Model: {model}")
-    print(f"           Input: {input_tokens} | Output: {output_tokens} | Total: {total_tokens}")
-    print(f"           Cost: ${total_cost:.6f}")
-    
-    return {
-        "operation": operation,
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
-        "cost_usd": total_cost,
-    }
+    if not MARKETPLACE_ENABLED:
+        abort(404, description="Marketplace integration is disabled on this deployment.")
+
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"success": False, "error": "No JSON payload provided"}), 400
+
+        order_id = data.get("orderId")
+        status = data.get("status", "").upper()
+        
+        logger.info(f"  [WEBHOOK] Received payment update for Order {order_id}: {status}")
+        
+        if status == "SUCCESS":
+            # Here we would typically call the marketplace API to update the order status
+            # e.g., requests.post("http://localhost:3000/api/admin/order/updateStatus", ...)
+            pass
+            
+        return jsonify({"success": True, "message": "Webhook processed successfully"}), 200
+        
+    except Exception as e:
+        logger.error(f"  [WEBHOOK] Error processing payment webhook: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ==========================================
+# ERROR HANDLERS
+# ==========================================
 
 
 # ===== OPENAI API WRAPPERS =====
@@ -238,7 +285,7 @@ def upload_images_to_gridfs(images, source_filename, fs, knowledge_base_id=""):
         )
         gridfs_id_str = str(gridfs_id)
 
-        print(f"  [GridFS] Uploaded {img_filename} -> {gridfs_id_str}")
+        logger.info(f"  [GridFS] Uploaded {img_filename} -> {gridfs_id_str}")
 
         uploaded.append({
             "page_number": img["page_number"],
@@ -280,7 +327,7 @@ def format_mongodb_documents(chunks, source_file, source_file_id, project_id, ad
     docs = []
     for chunk in chunks:
         # Generate semantic vector for the chunk text using OpenAI
-        print(f"  [EMBED] Generating vector for chunk {chunk['chunk_index']}...")
+        logger.info(f"  [EMBED] Generating vector for chunk {chunk['chunk_index']}...")
         embedding = generate_text_embedding(chunk["text"])
         
         # We pass the admin_id and project_id here
@@ -315,16 +362,28 @@ def health():
         abort(500, description=str(exc))
 
 
-@app.route('/upload/pdf', methods=['POST'])
+@app.route('/upload/document', methods=['POST'])
+@app.route('/upload/pdf', methods=['POST'])  # retained: original PDF-only path
 @project_key_required
-def upload_pdf(admin, project_id):
+@limiter.limit("20 per hour", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
+def upload_document(admin, project_id):
+    """
+    Ingests a document into this project's knowledge base.
+    Supported: PDF, DOCX, PPTX, XLSX, and images (OCR).
+    """
+    from phase1_upload.ingest import analyze_document, get_extension, UnsupportedFileTypeError, SUPPORTED_EXTENSIONS
+
     if 'file' not in request.files:
         abort(400, description='No file part in the request')
     file = request.files['file']
-    if file.filename == '' or not file.filename.lower().endswith('.pdf'):
-        abort(415, description='Only PDF files are accepted')
+    if not file.filename:
+        abort(400, description='No file selected')
 
-    pdf_bytes = file.read()
+    ext = get_extension(file.filename)
+    if ext not in SUPPORTED_EXTENSIONS:
+        abort(415, description=f"Unsupported file type '.{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+
+    file_bytes = file.read()
     admin_id = admin["adminId"]
 
     # Increment file upload count for the admin
@@ -334,25 +393,29 @@ def upload_pdf(admin, project_id):
     )
 
     # Use project_id as the knowledge base identifier
-    knowledge_base_id = project_id 
+    knowledge_base_id = project_id
 
-
-    # ---- Step 1: Store the raw PDF in GridFS (backup/reference) ----
+    # ---- Step 1: Store the raw file in GridFS (backup/reference) ----
     try:
-        raw_file_id = fs.put(pdf_bytes, filename=file.filename)
+        raw_file_id = fs.put(file_bytes, filename=file.filename)
     except Exception as exc:
-        abort(500, description=f'Failed to store raw PDF: {exc}')
+        abort(500, description=f'Failed to store raw file: {exc}')
 
-    # ---- Step 2: analyze_document_layout() ----
-    layout = analyze_document_layout(pdf_bytes)
+    # ---- Step 2: parse into the shared layout shape (format-specific) ----
+    try:
+        layout = analyze_document(file_bytes, file.filename)
+    except UnsupportedFileTypeError as e:
+        abort(415, description=str(e))
     if layout is None:
-        abort(500, description='Failed to parse the PDF')
+        abort(422, description=f'Failed to parse the uploaded .{ext} file (it may be corrupt, empty, or an image with no readable text)')
 
     # ---- Step 3: group_content_by_topic() ----
     topic_groups = group_content_by_topic(layout["semantic_blocks"])
 
     # ---- Step 4: generate_semantic_chunks() ----
     chunks = generate_semantic_chunks(topic_groups)
+    if not chunks:
+        abort(422, description='No readable text content was extracted from the uploaded file')
 
     # ---- Step 5: upload_images_to_gridfs() (simplified — no captioning) ----
     uploaded_images = upload_images_to_gridfs(layout["images"], file.filename, fs, knowledge_base_id)
@@ -367,12 +430,16 @@ def upload_pdf(admin, project_id):
         # Sample text from first few chunks
         sample_text = " ".join([c["text"] for c in chunks[:3]])
         kb_language = detect_query_language(sample_text)
-        print(f"  [LANG] Detected PDF language: {kb_language}")
+        logger.info(f"  [LANG] Detected document language: {kb_language}")
 
     # ---- Step 7: format_mongodb_documents() (generates embeddings + attaches image IDs) ----
-    chunk_docs = format_mongodb_documents(
-        chunks, file.filename, raw_file_id, project_id, admin_id, language=kb_language
-    )
+    from phase2_retrieval.rag_logic import EmbeddingGenerationError
+    try:
+        chunk_docs = format_mongodb_documents(
+            chunks, file.filename, raw_file_id, project_id, admin_id, language=kb_language
+        )
+    except EmbeddingGenerationError as e:
+        abort(502, description=f"Embedding service unavailable, please retry the upload: {e}")
 
     # ---- Step 8: bulk_insert_chunks() ----
     inserted_count = bulk_insert_chunks(chunk_docs)
@@ -380,16 +447,46 @@ def upload_pdf(admin, project_id):
     return jsonify({
         "chunks_created": inserted_count,
         "images_extracted": len(uploaded_images),
-        "message": "PDF processed and chunked successfully",
+        "message": "Document processed and chunked successfully",
+        "file_type": ext,
         "project_id": project_id,
         "raw_fileid": str(raw_file_id),
         "total_pages": layout["total_pages"]
     }), 201
 
 
+def generate_image_url(base_url, image_id):
+    """
+    Builds a time-limited, HMAC-signed URL for fetching a GridFS image.
+    Needed because WhatsApp's own servers fetch these URLs directly — there's
+    no way to attach an API-key header — so the link itself must be unguessable
+    and expire, rather than relying on the raw (enumerable) GridFS ObjectId alone.
+    """
+    expiry = int(time.time()) + IMAGE_URL_TTL_SECONDS
+    signature = hmac.new(
+        IMAGE_URL_SIGNING_SECRET.encode(), f"{image_id}.{expiry}".encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{base_url}/image/{image_id}?exp={expiry}&sig={signature}"
+
+
+def _verify_image_token(image_id, exp, sig):
+    if not exp or not sig:
+        return False
+    try:
+        expiry = int(exp)
+    except (TypeError, ValueError):
+        return False
+    if expiry < int(time.time()):
+        return False
+    expected_sig = hmac.new(
+        IMAGE_URL_SIGNING_SECRET.encode(), f"{image_id}.{expiry}".encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected_sig, sig)
+
+
 def format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url):
     """
-    Formats the AI's response into a WhatsApp-style JSON format 
+    Formats the AI's response into a WhatsApp-style JSON format
     (text bubbles, image bubbles, and interactive buttons).
     """
     payload = {
@@ -400,30 +497,32 @@ def format_whatsapp_payload(ai_text, selected_image_ids, tenant_config, base_url
             }
         ]
     }
-    
+
     # Add images from the retrieved chunks
     for img_id in selected_image_ids:
         payload["reply"].append({
             "type": "image",
-            "url": f"{base_url}/image/{img_id}"
+            "url": generate_image_url(base_url, img_id)
         })
-                
+
     # Add interactive buttons from the tenant config
     if tenant_config.get("buttons"):
         payload["reply"].append({
             "type": "buttons",
             "buttons": tenant_config["buttons"] # Changed from 'options' to 'buttons'
         })
-        
+
     return payload
 
 
 @app.route('/image/<image_id>', methods=['GET'])
 def serve_image_endpoint(image_id):
     """
-    Retrieves the actual image data from MongoDB GridFS 
-    and streams it to the browser.
+    Retrieves the actual image data from MongoDB GridFS
+    and streams it to the browser, provided the signed URL token is valid.
     """
+    if not _verify_image_token(image_id, request.args.get("exp"), request.args.get("sig")):
+        abort(403, description="Invalid or expired image link")
     try:
         file_obj = fs.get(bson.ObjectId(image_id))
         return Response(file_obj.read(), mimetype='image/jpeg')
@@ -431,6 +530,7 @@ def serve_image_endpoint(image_id):
         abort(404, description=f"Image not found: {e}")
 
 @app.route('/admin/register', methods=['POST'])
+@limiter.limit("5 per hour")
 def register_admin():
     """
     Creates a new admin entry in the admindetails collection.
@@ -546,13 +646,15 @@ def create_project(admin_doc):
         "message": "Project created successfully"
     }), 201
 @app.route('/admin/projects/<admin_id>', methods=['GET'])
-def list_projects(admin_id):
+@admin_key_required
+def list_projects(admin_doc, admin_id):
     """
     Returns all projects belonging to a specific admin.
+    Requires the Master Key for the SAME admin_id being requested —
+    prevents any tenant from listing another tenant's projects.
     """
-    from database import validate_admin
-    if not validate_admin(admin_id):
-        abort(404, description="Admin not found")
+    if admin_doc["adminId"] != admin_id:
+        abort(403, description="This Master Key does not grant access to the requested admin_id")
 
     projects = list(db["adminprojects"].find(
         {"adminId": admin_id},
@@ -560,6 +662,20 @@ def list_projects(admin_id):
     ))
 
     return jsonify({"adminId": admin_id, "projects": projects})
+
+
+@app.route('/admin/usage', methods=['GET'])
+@admin_key_required
+def admin_usage(admin_doc):
+    """
+    Per-project token usage / estimated OpenAI cost, aggregated from stored
+    chat messages. Optional ?project_id=<id> to scope to a single project.
+    """
+    from database import get_usage_summary
+    project_id = request.args.get("project_id")
+    summary = get_usage_summary(admin_doc["adminId"], project_id=project_id)
+    return jsonify({"adminId": admin_doc["adminId"], "usage": summary})
+
 
 def _detect_user_language(query):
     """
@@ -617,14 +733,14 @@ def translate_action_response(text, query):
     Uses deterministic detection first — only calls the LLM if translation is needed.
     """
     lang = _detect_user_language(query)
-    print(f"  [TRANSLATE] Detected language: {lang} for query: '{query[:50]}'")
+    logger.info(f"  [TRANSLATE] Detected language: {lang} for query: '{query[:50]}'")
 
     # English queries → return text as-is, no LLM call needed
     if lang == "english":
         return text
 
     # Hindi or Hinglish → translate via LLM
-    from phase2_retrieval.rag_logic import openai_client
+    from llm_client import generate_text
 
     if lang == "hinglish":
         instruction = (
@@ -638,20 +754,19 @@ def translate_action_response(text, query):
         )
 
     try:
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": instruction},
-                {"role": "user", "content": text}
-            ],
+        resp, _usage = generate_text(
+            system_instruction=instruction,
+            contents=text,
             temperature=0.0,
+            max_output_tokens=4000,
+            operation="Action Response Translation",
         )
-        result_text = resp.choices[0].message.content.strip()
+        result_text = (resp.text or "").strip()
         if result_text.startswith("OUTPUT:"):
             result_text = result_text.replace("OUTPUT:", "", 1).strip()
-        return result_text
+        return result_text or text
     except Exception as e:
-        print(f"  [TRANSLATE] Failed to translate action response: {e}")
+        logger.error(f"  [TRANSLATE] Failed to translate action response: {e}")
         return text
 
 def core_chat_logic(data, admin, project_id):
@@ -700,7 +815,7 @@ def core_chat_logic(data, admin, project_id):
     else:
         user_id = None
 
-    print(f"  [SESSION] Phone: {phone} -> sessionId: {session_id}, userId: {user_id}")
+    logger.info(f"  [SESSION] Phone: {phone} -> sessionId: {session_id}, userId: {user_id}")
 
     # Create or find the session
     session_obj = get_or_create_session(session_id, user_id, admin_id, project_id)
@@ -746,8 +861,37 @@ def core_chat_logic(data, admin, project_id):
     from database import get_marketplace_state
     marketplace_state = get_marketplace_state(session_id)
 
-    if marketplace_state and marketplace_state.get("current_step") not in (None, "idle"):
+    if MARKETPLACE_ENABLED and marketplace_state and marketplace_state.get("current_step") not in (None, "idle"):
         current_step = marketplace_state["current_step"]
+        # ===== HELPER: LLM Semantic Selection =====
+        def resolve_selection_with_llm(user_input, options, type_name="option"):
+            import json
+            from llm_client import generate_text
+
+            options_str = json.dumps([{"id": opt.get("index"), "label": opt.get("label", opt.get("name", str(opt))), "details": opt} for opt in options], default=str)
+            prompt = f"You are an AI assistant helping to map a user's free-text utterance to one of the available {type_name} options.\n\nAvailable Options:\n{options_str}\n\nUser Utterance: \"{user_input}\"\n\nAnalyze the utterance. If it semantically matches one of the options, return a JSON object with a single key 'selected_id' containing the integer ID (the 'id' field). If the user is clearly changing the subject, asking a new question, or wanting to cancel (e.g. searching for a product, asking a general question), return {{\"selected_id\": \"BREAKOUT\"}}. Otherwise, if it doesn't match any option, return {{\"selected_id\": null}}."
+
+            try:
+                resp, _usage = generate_text(
+                    contents=prompt,
+                    temperature=0,
+                    json_mode=True,
+                    max_output_tokens=500,
+                    operation="Semantic State Resolver",
+                )
+                parsed = json.loads(resp.text)
+                selected_id = parsed.get("selected_id")
+                if str(selected_id) == "BREAKOUT":
+                    return "BREAKOUT"
+                if selected_id:
+                    for opt in options:
+                        if opt.get("index") == selected_id:
+                            return opt
+            except Exception as e:
+                logger.error(f"Failed to resolve selection with LLM: {e}")
+            return None
+
+        is_breakout = False
 
         if current_step == "awaiting_email":
             # The user's message IS their email address
@@ -760,21 +904,13 @@ def core_chat_logic(data, admin, project_id):
 
             save_chat_message(session_id, "user", query)
             save_chat_message(session_id, "ai", ai_text)
-
             base_url = request.host_url.rstrip('/')
             return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
 
         elif current_step == "awaiting_otp":
-            query_clean = query.strip()
-            # If the user typed an email address instead of an OTP, restart the flow
-            if "@" in query_clean and "." in query_clean:
-                from phase4_integrations.marketplace_auth import initiate_otp_login
-                result = initiate_otp_login(query_clean, session_id)
-            else:
-                # The user's message IS the OTP code
-                from phase4_integrations.marketplace_auth import verify_otp_and_authenticate
-                result = verify_otp_and_authenticate(query_clean, session_id, marketplace_state)
-            
+            # The user's message IS the OTP
+            from phase4_integrations.marketplace_auth import verify_otp_login
+            result = verify_otp_login(query.strip(), session_id, session_obj)
             ai_text = result["message"]
             tenant_config = project_config
 
@@ -782,9 +918,522 @@ def core_chat_logic(data, admin, project_id):
 
             save_chat_message(session_id, "user", query)
             save_chat_message(session_id, "ai", ai_text)
-
             base_url = request.host_url.rstrip('/')
             return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+
+        # ===== CHECKOUT STATE: Address Selection =====
+        elif current_step == "awaiting_address_selection":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            addresses = marketplace_state.get("checkout_addresses", [])
+            user_input = query.strip()
+            
+            selected_addr = None
+            try:
+                idx = int(user_input)
+                for a in addresses:
+                    if a["index"] == idx:
+                        selected_addr = a
+                        break
+            except ValueError:
+                for a in addresses:
+                    if a.get("label", "").lower() in user_input.lower() or user_input.lower() in a.get("label", "").lower():
+                        selected_addr = a
+                        break
+            
+            if not selected_addr:
+                selected_addr = resolve_selection_with_llm(user_input, addresses, "address")
+                
+            if selected_addr == "BREAKOUT":
+                from database import update_marketplace_state
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+            elif not selected_addr:
+                ai_text = f"I couldn't match that to any address. Please reply with a number (1-{len(addresses)})."
+                tenant_config = project_config
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+            
+            if not is_breakout:
+                import datetime as _dt
+                today = _dt.date.today()
+                date_options = [
+                    {"date": today.isoformat(), "label": "Today", "index": 1},
+                    {"date": (today + _dt.timedelta(days=1)).isoformat(), "label": "Tomorrow", "index": 2},
+                    {"date": (today + _dt.timedelta(days=2)).isoformat(), "label": "Day After Tomorrow", "index": 3},
+                    {"date": "__custom__", "label": "Choose a Custom Date", "index": 4},
+                ]
+                
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_date_selection",
+                    "selectedAddressId": selected_addr["id"],
+                    "checkout_dates": date_options,
+                })
+                
+                ai_text = "\U0001F4C5 *Select a Delivery Date:*\n\n"
+                for opt in date_options:
+                    if opt["date"] == "__custom__":
+                        ai_text += f"*{opt['index']}. {opt['label']}*\n"
+                    else:
+                        ai_text += f"*{opt['index']}. {opt['label']}* ({opt['date']})\n"
+                ai_text += "\nReply with the *number* of your preferred delivery date, or tell me the date in words (e.g. \"Thursday\", \"June 25th\")."
+                
+                buttons = [
+                    {"id": "1", "title": "Today"},
+                    {"id": "2", "title": "Tomorrow"},
+                    {"id": "3", "title": "Day After Tomorrow"},
+                ]
+                wp_payload = {
+                    "type": "session_quick_reply_with_text",
+                    "media": {
+                        "header": {"text": ""},
+                        "body": ai_text,
+                        "footer_text": "",
+                        "button": buttons,
+                    },
+                }
+                
+                tenant_config = project_config
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+
+        # ===== CHECKOUT STATE: Date Selection =====
+        elif current_step == "awaiting_date_selection":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            date_options = marketplace_state.get("checkout_dates", [])
+            user_input = query.strip()
+            
+            selected_date = None
+            try:
+                idx = int(user_input)
+                for d in date_options:
+                    if d["index"] == idx:
+                        selected_date = d
+                        break
+            except ValueError:
+                for d in date_options:
+                    if d.get("label", "").lower() in user_input.lower() or user_input.lower() in d.get("label", "").lower():
+                        selected_date = d
+                        break
+            
+            if not selected_date:
+                selected_date = resolve_selection_with_llm(user_input, date_options, "delivery date")
+                
+            if selected_date == "BREAKOUT":
+                from database import update_marketplace_state
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+            elif not selected_date:
+                ai_text = f"I couldn't match that to any date. Please reply with a number (1-{len(date_options)}), or say the date in words."
+                tenant_config = project_config
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+            
+            if not is_breakout:
+                if selected_date.get("date") == "__custom__":
+                    update_marketplace_state(session_id, {
+                        "current_step": "awaiting_custom_date",
+                    })
+                    ai_text = "\U0001F4C5 Please tell me the date you'd like delivery on.\n\n"
+                    ai_text += "You can say things like:\n"
+                    ai_text += "• *June 25*\n• *Thursday*\n• *25th of this month*\n• *next Monday*\n\n"
+                    ai_text += "Or type the date as *YYYY-MM-DD* (e.g. 2026-06-25)."
+                    tenant_config = project_config
+                    save_chat_message(session_id, "user", query)
+                    save_chat_message(session_id, "ai", ai_text)
+                    base_url = request.host_url.rstrip('/')
+                    return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+                
+                import datetime as _dt
+                selected_date_str = selected_date["date"]
+                is_today = (selected_date_str == _dt.date.today().isoformat())
+                now = _dt.datetime.now()
+                
+                ALL_SLOTS = [
+                    {"name": "8 AM - 10 AM",  "startTime": "08:00", "endTime": "10:00"},
+                    {"name": "10 AM - 12 PM", "startTime": "10:00", "endTime": "12:00"},
+                    {"name": "12 PM - 2 PM",  "startTime": "12:00", "endTime": "14:00"},
+                    {"name": "2 PM - 4 PM",   "startTime": "14:00", "endTime": "16:00"},
+                    {"name": "4 PM - 6 PM",   "startTime": "16:00", "endTime": "18:00"},
+                    {"name": "6 PM - 8 PM",   "startTime": "18:00", "endTime": "20:00"},
+                ]
+                
+                available_slots = []
+                for s in ALL_SLOTS:
+                    if is_today:
+                        slot_start = _dt.datetime.strptime(s["startTime"], "%H:%M").replace(
+                            year=now.year, month=now.month, day=now.day
+                        )
+                        if slot_start <= now:
+                            continue
+                    available_slots.append(s)
+                
+                if not available_slots:
+                    ai_text = "\u23F0 Sorry, all delivery slots for today have already passed. Please choose a different date."
+                    update_marketplace_state(session_id, {
+                        "current_step": "awaiting_date_selection",
+                    })
+                    tenant_config = project_config
+                    save_chat_message(session_id, "user", query)
+                    save_chat_message(session_id, "ai", ai_text)
+                    base_url = request.host_url.rstrip('/')
+                    return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+                
+                slot_options = []
+                ai_text = "\u23F0 *Available Delivery Slots:*\n\n"
+                for idx, s in enumerate(available_slots, 1):
+                    slot_options.append({
+                        "id": f"local_slot_{idx}",
+                        "name": s["name"],
+                        "label": s["name"],
+                        "timing": s["name"],
+                        "startTime": s["startTime"],
+                        "endTime": s["endTime"],
+                        "index": idx,
+                    })
+                    ai_text += f"*{idx}. {s['name']}*\n"
+                ai_text += "\nReply with the *number* of the slot you'd like, or say it in words (e.g. \"morning\", \"4 to 6\")."
+                
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_slot_selection",
+                    "selectedDeliveryDate": selected_date_str,
+                    "checkout_slots": slot_options,
+                })
+                
+                buttons = []
+                for opt in slot_options[:3]:
+                    buttons.append({"id": str(opt["index"]), "title": opt["name"][:20]})
+                wp_payload = {
+                    "type": "session_quick_reply_with_text",
+                    "media": {
+                        "header": {"text": "Delivery Slots"},
+                        "body": ai_text,
+                        "footer_text": "",
+                        "button": buttons,
+                    },
+                }
+                
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+
+        # ===== CHECKOUT STATE: Custom Date Entry =====
+        elif current_step == "awaiting_custom_date":
+            from database import update_marketplace_state
+            import datetime as _dt
+            user_input = query.strip()
+            
+            parsed_date = None
+            try:
+                parsed_date = _dt.datetime.strptime(user_input, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+            
+            if not parsed_date:
+                for fmt in ["%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%B %d", "%b %d", "%d %B", "%d %b"]:
+                    try:
+                        d = _dt.datetime.strptime(user_input, fmt).date()
+                        if d.year == 1900:
+                            d = d.replace(year=_dt.date.today().year)
+                        parsed_date = d
+                        break
+                    except ValueError:
+                        continue
+            
+            if not parsed_date:
+                import json
+                from llm_client import generate_text
+                try:
+                    resp, _usage = generate_text(
+                        contents=f"Today is {_dt.date.today().isoformat()} ({_dt.date.today().strftime('%A')}). The user said: \"{user_input}\". What date are they referring to? Return ONLY a JSON object with key 'date' in YYYY-MM-DD format. If the user is clearly changing the subject, asking a new question, or wanting to cancel (e.g. searching for a product), return {{\"date\": \"BREAKOUT\"}}. If you cannot determine a date, return {{\"date\": null}}.",
+                        temperature=0,
+                        json_mode=True,
+                        max_output_tokens=200,
+                        operation="Custom Date Parser",
+                    )
+                    result = json.loads(resp.text)
+                    date_str = result.get("date")
+                    if date_str == "BREAKOUT":
+                        from database import update_marketplace_state
+                        update_marketplace_state(session_id, {"current_step": "idle"})
+                        parsed_date = "BREAKOUT"
+                    elif date_str:
+                        parsed_date = _dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+                except Exception as e:
+                    logger.error(f"  [CUSTOM DATE] LLM parse failed: {e}")
+            
+            if parsed_date == "BREAKOUT":
+                is_breakout = True
+            elif not parsed_date or parsed_date < _dt.date.today():
+                ai_text = "I couldn't understand that date, or it's in the past. Please try again.\n\nExamples: *June 25*, *Thursday*, *next Monday*, or *2026-06-25*."
+                tenant_config = project_config
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+            
+            if not is_breakout:
+                selected_date_str = parsed_date.isoformat()
+                is_today = (selected_date_str == _dt.date.today().isoformat())
+                now = _dt.datetime.now()
+                
+                ALL_SLOTS = [
+                    {"name": "8 AM - 10 AM",  "startTime": "08:00", "endTime": "10:00"},
+                    {"name": "10 AM - 12 PM", "startTime": "10:00", "endTime": "12:00"},
+                    {"name": "12 PM - 2 PM",  "startTime": "12:00", "endTime": "14:00"},
+                    {"name": "2 PM - 4 PM",   "startTime": "14:00", "endTime": "16:00"},
+                    {"name": "4 PM - 6 PM",   "startTime": "16:00", "endTime": "18:00"},
+                    {"name": "6 PM - 8 PM",   "startTime": "18:00", "endTime": "20:00"},
+                ]
+                
+                available_slots = []
+                for s in ALL_SLOTS:
+                    if is_today:
+                        slot_start = _dt.datetime.strptime(s["startTime"], "%H:%M").replace(
+                            year=now.year, month=now.month, day=now.day
+                        )
+                        if slot_start <= now:
+                            continue
+                    available_slots.append(s)
+                
+                if not available_slots:
+                    ai_text = "\u23F0 Sorry, all delivery slots for today have already passed. Please choose a different date."
+                    update_marketplace_state(session_id, {
+                        "current_step": "awaiting_custom_date",
+                    })
+                    tenant_config = project_config
+                    save_chat_message(session_id, "user", query)
+                    save_chat_message(session_id, "ai", ai_text)
+                    base_url = request.host_url.rstrip('/')
+                    return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+                
+                slot_options = []
+                ai_text = f"\U0001F4C5 Delivery on *{parsed_date.strftime('%A, %B %d')}*\n\n\u23F0 *Available Delivery Slots:*\n\n"
+                for idx, s in enumerate(available_slots, 1):
+                    slot_options.append({
+                        "id": f"local_slot_{idx}",
+                        "name": s["name"],
+                        "label": s["name"],
+                        "timing": s["name"],
+                        "startTime": s["startTime"],
+                        "endTime": s["endTime"],
+                        "index": idx,
+                    })
+                    ai_text += f"*{idx}. {s['name']}*\n"
+                ai_text += "\nReply with the *number* of the slot you'd like."
+                
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_slot_selection",
+                    "selectedDeliveryDate": selected_date_str,
+                    "checkout_slots": slot_options,
+                })
+                
+                buttons = []
+                for opt in slot_options[:3]:
+                    buttons.append({"id": str(opt["index"]), "title": opt["name"][:20]})
+                wp_payload = {
+                    "type": "session_quick_reply_with_text",
+                    "media": {
+                        "header": {"text": "Delivery Slots"},
+                        "body": ai_text,
+                        "footer_text": "",
+                        "button": buttons,
+                    },
+                }
+                
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+
+        # ===== CHECKOUT STATE: Slot Selection =====
+        elif current_step == "awaiting_slot_selection":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            slots = marketplace_state.get("checkout_slots", [])
+            user_input = query.strip()
+            
+            selected_slot = None
+            try:
+                idx = int(user_input)
+                for s in slots:
+                    if s["index"] == idx:
+                        selected_slot = s
+                        break
+            except ValueError:
+                for s in slots:
+                    if s.get("name", "").lower() in user_input.lower() or user_input.lower() in s.get("name", "").lower():
+                        selected_slot = s
+                        break
+            
+            if not selected_slot:
+                selected_slot = resolve_selection_with_llm(user_input, slots, "delivery time slot")
+                
+            if selected_slot == "BREAKOUT":
+                from database import update_marketplace_state
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+            elif not selected_slot:
+                ai_text = f"I couldn't match that to any slot. Please reply with a number (1-{len(slots)})."
+                tenant_config = project_config
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, None
+            
+            if not is_breakout:
+                selected_address_id = marketplace_state.get("selectedAddressId", "")
+                update_marketplace_state(session_id, {
+                    "current_step": "idle",
+                    "selectedSlotId": selected_slot["id"],
+                    "selectedSlotName": selected_slot.get("name", ""),
+                    "selectedSlotTiming": selected_slot.get("timing", ""),
+                })
+                
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="calculate_delivery_charge",
+                    parameters={"customerDeliveryAddressId": selected_address_id}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+                
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+
+        # ===== CHECKOUT STATE: Coupons or Place Order =====
+        elif current_step == "awaiting_checkout_decision":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            user_input = query.strip().lower()
+            
+            if any(w in user_input for w in ["coupon", "discount", "code", "coupons"]):
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="list_coupons",
+                    parameters={}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+            elif any(w in user_input for w in ["place", "order", "yes", "proceed", "skip", "no coupon"]):
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="create_order",
+                    parameters={}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+            else:
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+
+        # ===== CHECKOUT STATE: Coupon Selection =====
+        elif current_step == "awaiting_coupon_selection":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            user_input = query.strip()
+            
+            if user_input.lower() in ("skip", "no", "no coupon", "none"):
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="create_order",
+                    parameters={}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+            elif len(user_input.split()) > 2:
+                # Likely a breakout statement rather than a coupon code
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+            else:
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="verify_coupon",
+                    parameters={"couponCode": user_input}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
+
+        # ===== CHECKOUT STATE: Order Confirmation =====
+        elif current_step == "awaiting_order_confirmation":
+            from database import update_marketplace_state
+            from phase4_integrations.marketplace_auth import handle_marketplace_action
+            user_input = query.strip().lower()
+            
+            if user_input in ("yes", "y", "confirm", "ha", "haan", "ok", "place order", "place", "proceed"):
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                result = handle_marketplace_action(
+                    session=session_obj,
+                    session_id=session_id,
+                    action_id="create_order",
+                    parameters={}
+                )
+                ai_text = result["message"]
+                wp_payload = result.get("whatsapp_payload")
+            elif user_input in ("no", "cancel", "abort", "nahi"):
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                ai_text = "Order cancelled. No worries! Your items are still in the cart if you change your mind. 🛒"
+                wp_payload = None
+            else:
+                update_marketplace_state(session_id, {"current_step": "idle"})
+                is_breakout = True
+            
+            if not is_breakout:
+                tenant_config = project_config
+                ai_text = translate_action_response(ai_text, query)
+                save_chat_message(session_id, "user", query)
+                save_chat_message(session_id, "ai", ai_text)
+                base_url = request.host_url.rstrip('/')
+                return ai_text, [], tenant_config, base_url, session_id, is_expired, project_id, wp_payload
 
         elif current_step == "awaiting_cart_confirmation":
             # The user is responding to "Add X to your cart? Yes/No"
@@ -832,8 +1481,8 @@ def core_chat_logic(data, admin, project_id):
     is_greeting = query.strip().lower() in ["hi", "hello", "hey", "start", "menu", "/start", "hii", "hiii"]
     if is_greeting:
         from phase4_integrations.intent_router import get_connected_services
-        has_marketplace = any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
-        
+        has_marketplace = MARKETPLACE_ENABLED and any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
+
         if has_marketplace:
             from phase4_integrations.marketplace_auth import check_marketplace_auth, update_marketplace_state
             if not check_marketplace_auth(session_obj):
@@ -866,7 +1515,7 @@ def core_chat_logic(data, admin, project_id):
 
     if intent["type"] == "action":
         # ── Marketplace actions → dedicated handler ──
-        if intent["service_id"] == "marketplace":
+        if MARKETPLACE_ENABLED and intent["service_id"] == "marketplace":
             from phase4_integrations.marketplace_auth import handle_marketplace_action
             result = handle_marketplace_action(
                 session=session_obj,
@@ -903,8 +1552,8 @@ def core_chat_logic(data, admin, project_id):
     # Catch any query that fell through to RAG. If marketplace is connected,
     # the user MUST be logged in to chat.
     from phase4_integrations.intent_router import get_connected_services
-    has_marketplace = any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
-    
+    has_marketplace = MARKETPLACE_ENABLED and any(s["serviceId"] == "marketplace" for s in get_connected_services(project_id))
+
     if has_marketplace:
         from phase4_integrations.marketplace_auth import check_marketplace_auth, update_marketplace_state
         if not check_marketplace_auth(session_obj):
@@ -934,29 +1583,35 @@ def core_chat_logic(data, admin, project_id):
     
     search_query = query
     if detected_lang != kb_language:
-        from phase2_retrieval.rag_logic import openai_client
-        translate_resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": f"Translate the following text to {kb_language}. Return ONLY the translation."},
-                {"role": "user", "content": query}
-            ],
-            temperature=0.0,
-        )
-        search_query = translate_resp.choices[0].message.content.strip()
+        from llm_client import generate_text
         try:
-            usage = translate_resp.usage
-            from token_logger import log_openai_expenditure
-            log_openai_expenditure("Query Translation", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-        except Exception as log_err:
-            print(f"Failed to log translation tokens: {log_err}")
+            translate_resp, _usage = generate_text(
+                system_instruction=f"Translate the following text to {kb_language}. Return ONLY the translation.",
+                contents=query,
+                temperature=0.0,
+                max_output_tokens=1000,
+                operation="Query Translation",
+            )
+            translated = (translate_resp.text or "").strip()
+            if translated:
+                search_query = translated
+        except Exception as e:
+            # Translation is an optimization, not a requirement — fall back to
+            # the original query rather than failing the whole request.
+            logger.error(f"  [RAG] Query translation failed, using original query: {e}")
 
-    # 2. Retrieval
-    from phase2_retrieval.rag_logic import generate_text_embedding
+    # 2. Retrieval (tenant-scoped vector search, then hybrid re-rank)
+    from phase2_retrieval.rag_logic import generate_query_embedding, EmbeddingGenerationError, rerank_chunks
     from database import perform_semantic_retrieval
-    query_embedding = generate_text_embedding(search_query)
-    chunks = perform_semantic_retrieval(query_embedding, kb_id, n=4)
-    
+    try:
+        query_embedding = generate_query_embedding(search_query)
+    except EmbeddingGenerationError as e:
+        logger.error(f"  [RETRIEVAL] Embedding generation failed: {e}")
+        return "I'm having trouble reaching the AI service right now — please try again in a moment.", [], project_config, "", session_id, is_expired, project_id, None
+
+    candidates = perform_semantic_retrieval(query_embedding, kb_id, n=4)
+    chunks = rerank_chunks(search_query, candidates, n=4)
+
     if not chunks:
         return "I'm sorry, I couldn't find any information.", [], project_config, "", session_id, is_expired, project_id, None
 
@@ -983,6 +1638,7 @@ def core_chat_logic(data, admin, project_id):
 
 @app.route('/chat/v2', methods=['POST'])
 @project_key_required
+@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
 def chat_v2(admin, project_id):
     """Phase 2: Standard Reply Array output."""
     try:
@@ -1006,6 +1662,7 @@ def chat_v2(admin, project_id):
 
 @app.route('/chat/v3', methods=['POST'])
 @project_key_required
+@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
 def chat_v3(admin, project_id):
     """Phase 3: Agentic Session Message output."""
     try:
@@ -1034,7 +1691,7 @@ def chat_v3(admin, project_id):
             return jsonify(agentic_payload)
 
         # Prepare info for formatter
-        image_urls = [f"{base_url}/image/{img_id}" for img_id in selected_image_ids]
+        image_urls = [generate_image_url(base_url, img_id) for img_id in selected_image_ids]
         buttons = tenant_config.get("buttons", [])
         user_info = {"name": data.get("user_name", "User"), "phone": data.get("user_id", "")}
         tag_ids = data.get("tag_ids", [])
@@ -1062,7 +1719,7 @@ def chat_v3(admin, project_id):
             return jsonify({"error": "the sessionid or userid is invalid"}), 400
         raise
     except Exception as e:
-        print(f"Chat v3 Error: {e}")
+        logger.error(f"Chat v3 Error: {e}")
         import traceback
         traceback.print_exc()
         abort(500, description=str(e))
@@ -1182,6 +1839,14 @@ def disconnect_integration(admin_doc):
         return jsonify({"status": "disconnected", "message": f"{data['serviceId']} removed."})
     else:
         abort(404, description="Integration not found.")
+
+
+# ===== PUBLIC DEMO API =====
+# Registered last so it can import from this module without a circular import
+# at definition time.
+from demo_api import demo_bp
+app.register_blueprint(demo_bp)
+limiter.limit("60 per minute")(demo_bp)
 
 
 if __name__ == "__main__":

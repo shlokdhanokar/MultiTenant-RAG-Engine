@@ -6,6 +6,9 @@ wants a standard RAG answer OR wants to trigger a real-world action.
 import os
 import sys
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from database import db
@@ -37,12 +40,16 @@ def get_connected_services(project_id):
 
 def build_tool_definitions(connected_services):
     """
-    Converts the connected services and their actions into OpenAI-compatible
-    Function Calling tool definitions.
-    
-    Each action becomes one "function" that the LLM can call.
+    Converts the connected services and their actions into Gemini
+    FunctionDeclarations.
+
+    Each action becomes one function the model can call. Names are namespaced
+    as "<serviceId>__<actionId>" so the flat function namespace Gemini exposes
+    can be mapped back to a specific service on the way out.
     """
-    tools = []
+    from google.genai import types
+
+    declarations = []
 
     # Internal/automatic parameters that the user shouldn't be required to provide in chat.
     NOT_REQUIRED_PARAMS = {
@@ -58,39 +65,44 @@ def build_tool_definitions(connected_services):
             # Build parameter schema from the action's parameter list
             properties = {}
             for param in action.get("parameters", []):
-                # Infer type for known numeric fields
                 if param in ("limit", "offset", "quantity", "totalAmount", "paidAmount", "deliveryCharge"):
-                    param_type = "number"
+                    param_type = "NUMBER"
                 else:
-                    param_type = "string"
-                properties[param] = {"type": param_type, "description": f"The {param} value"}
+                    param_type = "STRING"
+
+                desc = f"The {param} value."
+                if param == "customerDeliveryAddressId":
+                    desc = "The ID of the delivery address the user selected (found in previous messages)."
+                elif param == "deliverySlotId":
+                    desc = "The ID of the delivery slot the user selected (found in previous messages)."
+                elif param == "searchKey":
+                    desc = "The item the user is searching for, translated to English singular."
+                    
+                properties[param] = {"type": param_type, "description": desc}
 
             required_params = [
                 p for p in action.get("parameters", [])
                 if p not in NOT_REQUIRED_PARAMS
             ]
 
-            tool = {
-                "type": "function",
-                "function": {
-                    "name": f"{service['serviceId']}__{action['actionId']}",
-                    "description": f"{action['actionName']} via {service['serviceName']}",
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": required_params
-                    }
-                }
-            }
-            tools.append(tool)
+            declaration = types.FunctionDeclaration(
+                name=f"{service['serviceId']}__{action['actionId']}",
+                description=f"{action['actionName']} via {service['serviceName']}. {action.get('description', '')}",
+                parameters={
+                    "type": "OBJECT",
+                    "properties": properties,
+                    "required": required_params,
+                } if properties else None,
+            )
+            declarations.append(declaration)
 
-    return tools
+    return declarations
 
 
 def route_intent(query, project_id, project_config, chat_history=None):
     """
-    The main routing function. Sends the user query to OpenAI with Function Calling
-    enabled. The LLM decides:
+    The main routing function. Sends the user query to Gemini with function
+    calling enabled. The model decides:
       - If it's a simple question -> returns a normal text answer (use RAG).
       - If it's an action request   -> returns a function_call with parameters.
 
@@ -103,9 +115,8 @@ def route_intent(query, project_id, project_config, chat_history=None):
             "parameters": <dict>       (if type == "action"),
         }
     """
-    from openai import OpenAI
-
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    from google.genai import types
+    from llm_client import generate_text
 
     # 1. Check what services this project has connected
     connected_services = get_connected_services(project_id)
@@ -114,71 +125,66 @@ def route_intent(query, project_id, project_config, chat_history=None):
     if not connected_services:
         return {"type": "rag"}
 
-    # 2. Build tool definitions for OpenAI
-    tools = build_tool_definitions(connected_services)
+    # 2. Build tool definitions
+    declarations = build_tool_definitions(connected_services)
+    if not declarations:
+        return {"type": "rag"}
 
     # 3. Build the system prompt
-    system_prompt = """You are an intent routing assistant. Your ONLY job is to decide whether to call a function/tool or route to RAG.
+    service_instructions = "\n".join([f"- {s['serviceName']}: {s.get('description', '')}" for s in connected_services])
+
+    system_prompt = f"""You are an intent routing assistant. Your ONLY job is to decide whether to call a function/tool or route to RAG.
+
+SERVICE CONTEXT AND SOPs:
+{service_instructions}
 
 CRITICAL INSTRUCTION: If the user's message is requesting any e-commerce or shopping action that maps to one of the available integration tools (e.g. searching products, viewing the cart, "show my cart", adding items to the cart, placing an order, etc.), you MUST call the appropriate function. Do NOT answer these with normal text.
 
-CRITICAL PARAMETER TRANSLATION: If the user's query is in a non-English language or written in Romanized scripts (e.g. Hinglish "mujhe narangi chahiye"), you MUST translate the actual search terms into English before passing them as function arguments. For example, if they search for "narangi" or "seb", you must pass {"searchKey": "orange"} or {"searchKey": "apple"}. 
+CRITICAL PARAMETER TRANSLATION: If the user's query is in a non-English language or written in Romanized scripts (e.g. Hinglish "mujhe narangi chahiye"), you MUST translate the actual search terms into English before passing them as function arguments. For example, if they search for "narangi" or "seb", you must pass {{"searchKey": "orange"}} or {{"searchKey": "apple"}}. 
 
 Only route to RAG (by returning normal text) if the user is asking a general knowledge question that does NOT relate to any available integration tool."""
 
-    messages = [{"role": "system", "content": system_prompt}]
+    contents = []
 
     # Add recent chat history for context
     if chat_history:
         for msg in chat_history[-6:]:
-            role = "user" if msg.get("role") == "user" else "assistant"
-            messages.append({"role": role, "content": msg.get("content", "")})
+            role = "user" if msg.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
 
-    messages.append({"role": "user", "content": query})
+    contents.append({"role": "user", "parts": [{"text": query}]})
 
-    # 4. Call OpenAI with function calling
+    # 4. Call Gemini with function calling
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
+        response, _usage = generate_text(
+            system_instruction=system_prompt,
+            contents=contents,
+            tools=[types.Tool(function_declarations=declarations)],
             temperature=0.1,
-            max_tokens=300
+            max_output_tokens=1000,
+            operation="Intent Routing",
         )
-        try:
-            usage = response.usage
-            from token_logger import log_openai_expenditure
-            log_openai_expenditure("Intent Routing", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-        except Exception as log_err:
-            print(f"Failed to log intent routing tokens: {log_err}")
     except Exception as e:
-        print(f"  [INTENT] OpenAI call failed: {e}")
+        logger.error(f"  [INTENT] Gemini call failed: {e}")
         return {"type": "rag"}
 
-    choice = response.choices[0]
-
-    # 5. Check if the LLM decided to call a function
-    if choice.message.tool_calls:
-        tool_call = choice.message.tool_calls[0]
-        full_name = tool_call.function.name
-        raw_args = tool_call.function.arguments
+    # 5. Check if the model decided to call a function
+    function_calls = response.function_calls or []
+    if function_calls:
+        call = function_calls[0]
+        full_name = call.name
 
         # Parse "google_calendar__create_event" -> service_id, action_id
         parts = full_name.split("__", 1)
         if len(parts) != 2:
-            print(f"  [INTENT] Malformed function name: {full_name}")
+            logger.info(f"  [INTENT] Malformed function name: {full_name}")
             return {"type": "rag"}
 
         service_id, action_id = parts
+        parameters = dict(call.args) if call.args else {}
 
-        try:
-            parameters = json.loads(raw_args)
-        except json.JSONDecodeError:
-            parameters = {}
-
-        print(f"  [INTENT] Action detected: {service_id} -> {action_id}")
-        print(f"  [INTENT] Parameters: {parameters}")
+        logger.info(f"  [INTENT] Action detected: {service_id} -> {action_id}")
+        logger.info(f"  [INTENT] Parameters: {parameters}")
 
         return {
             "type": "action",
@@ -188,5 +194,5 @@ Only route to RAG (by returning normal text) if the user is asking a general kno
         }
 
     # 6. No function call — it's a normal question, use RAG
-    print("  [INTENT] No action detected, routing to RAG.")
+    logger.info("  [INTENT] No action detected, routing to RAG.")
     return {"type": "rag"}

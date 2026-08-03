@@ -20,3 +20,39 @@ Thumbs.db
 
 # Scratch directory (contains test credentials)
 scratch/
+
+# Node / frontend build output
+node_modules/
+ui/dist/
+ui/node_modules/
+
+# ===== NEVER COMMIT: contains live credentials =====
+# Postman exports carry ~90 live Bearer JWTs for the marketplace API.
+*.postman_collection.json
+add_slots.py
+schema_fetcher.py
+create_admin_and_test.py
+scratch_test_api.py
+google_dump.html
+
+# ===== NEVER COMMIT: scraped third-party data (contains personal data) =====
+# One-off data-collection scripts unrelated to the RAG engine. Several scrape
+# practitioner listings including phone numbers — not ours to republish.
+practo_*.py
+google_*.py
+gmaps_*.py
+apply_places_api*.py
+fill_phones_google.py
+inspect_google.py
+update_locations.py
+update_practo.py
+recover_data.py
+remedy_bad_data.py
+final_polish.py
+fix_excel.py
+merge.py
+test_school_scraper.*
+test_practo_bypass.py
+
+# Local token/cost log — churns constantly, no value in history
+openai_token_log.csv

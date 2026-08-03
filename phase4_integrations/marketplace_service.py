@@ -33,7 +33,7 @@ def load_marketplace_config():
 MARKETPLACE_SERVICE = {
     "serviceId": "marketplace",
     "serviceName": "Infoware Marketplace",
-    "description": "Multi-vendor marketplace shopping assistant with OTP-based user auth",
+    "description": "Multi-vendor marketplace shopping assistant. CHECKOUT FLOW SOP: 1) Call list_delivery_addresses and ask user to choose. 2) When user replies with an address, remember its ID, then call get_delivery_slots and ask user to choose a time. 3) When user replies with a time slot, remember its ID, then call calculate_delivery_charge using the saved address ID. 4) Ask if they want to check for coupons, if yes call list_coupons then verify_coupon. 5) Confirm the final total. 6) When user says yes to placing order, call create_order with ALL the saved IDs (address, slot, etc.).",
     "authType": "marketplace_jwt",
     "isActive": True,
 
@@ -174,23 +174,107 @@ MARKETPLACE_SERVICE = {
             "parameters": ["orderId", "reason"],
             "requiresAuth": True,
         },
+        
+        # ── Address Management ──
+        {
+            "actionId": "list_delivery_addresses",
+            "actionName": "List Delivery Addresses",
+            "description": "Fetch the user's saved shipping addresses. Call this as the FIRST STEP when the user says they want to checkout or place an order.",
+            "method": "POST",
+            "endpoint": "user/customerDeliveryAddress/list",
+            "parameters": [],
+            "requiresAuth": True,
+        },
+        {
+            "actionId": "add_delivery_address",
+            "actionName": "Add Delivery Address",
+            "description": "Save a new physical shipping address to the user's profile.",
+            "method": "POST",
+            "endpoint": "user/customerDeliveryAddress/add",
+            "parameters": ["addressLabel", "streetAddress", "city", "state", "postalCode", "country"],
+            "requiresAuth": True,
+        },
+        
+        # ── Delivery Logistics ──
+        {
+            "actionId": "get_delivery_slots",
+            "actionName": "Get Delivery Slots",
+            "description": "Fetch available delivery time slots for a specific date so the user can choose when they want their order to arrive.",
+            "method": "POST",
+            "endpoint": "user/deliverySlot/list",
+            "parameters": ["date", "storeId"],
+            "requiresAuth": True,
+        },
+        {
+            "actionId": "calculate_delivery_charge",
+            "actionName": "Calculate Delivery Charge",
+            "description": "Calculate the shipping costs based on the chosen delivery address and the cart's value.",
+            "method": "POST",
+            "endpoint": "user/deliveryCharge/calculate",
+            "parameters": ["customerDeliveryAddressId"],
+            "requiresAuth": True,
+        },
+        
+        # ── Coupons ──
+        {
+            "actionId": "list_coupons",
+            "actionName": "List Coupons",
+            "description": "Show the user all available discount codes.",
+            "method": "POST",
+            "endpoint": "user/coupon/list",
+            "parameters": [],
+            "requiresAuth": True,
+        },
+        {
+            "actionId": "verify_coupon",
+            "actionName": "Verify Coupon",
+            "description": "Apply a discount code to the cart.",
+            "method": "POST",
+            "endpoint": "user/coupon/verify",
+            "parameters": ["couponCode"],
+            "requiresAuth": True,
+        },
+        
+        # ── Checkout / Orders ──
+        {
+            "actionId": "create_order",
+            "actionName": "Place Order",
+            "description": "Finalize checkout and place the order. Requires the chosen delivery address and delivery slot details.",
+            "method": "POST",
+            "endpoint": "user/order/addv4",
+            "parameters": [
+                "customerDeliveryAddressId", 
+                "deliverySlotId", 
+                "deliverySlotTiming", 
+                "deliverySlotName", 
+                "deliveryDate", 
+                "paymentType"
+            ],
+            "requiresAuth": True,
+        },
+        
+        # ── Wallets & Payments ──
+        {
+            "actionId": "list_wallets_and_transactions",
+            "actionName": "View Wallet",
+            "description": "Check the user's digital wallet balance and view their past top-ups or deductions.",
+            "method": "GET",
+            "endpoint": "customer/wallets",
+            "parameters": [],
+            "requiresAuth": True,
+        },
     ],
 
     # ── Internal Actions (not exposed to LLM, called programmatically) ──
     "internalActions": [
         {"actionId": "get_profile", "endpoint": "user/auth/getUserProfile", "method": "GET"},
         {"actionId": "get_settings", "endpoint": "user/setting", "method": "GET"},
-        {"actionId": "list_addresses", "endpoint": "user/customerDeliveryAddress/list", "method": "POST"},
-        {"actionId": "add_address", "endpoint": "user/customerDeliveryAddress/add", "method": "POST"},
         {"actionId": "set_default_address", "endpoint": "user/customerDeliveryAddress/setDefault", "method": "POST"},
-        {"actionId": "get_delivery_slots", "endpoint": "user/deliverySlot/list", "method": "POST"},
-        {"actionId": "calculate_delivery", "endpoint": "user/deliveryCharge/calculate", "method": "POST"},
-        {"actionId": "list_coupons", "endpoint": "user/coupon/list", "method": "POST"},
-        {"actionId": "verify_coupon", "endpoint": "user/coupon/verify", "method": "POST"},
         {"actionId": "update_cart", "endpoint": "user/cart/edit", "method": "POST"},
         {"actionId": "edit_order", "endpoint": "user/order/edit", "method": "POST"},
         {"actionId": "add_favorite", "endpoint": "user/favoriteProduct/add", "method": "POST"},
         {"actionId": "remove_favorite", "endpoint": "user/favoriteProduct/remove", "method": "POST"},
+        {"actionId": "generate_payment_link", "endpoint": "payment/generate", "method": "POST"},
         {"actionId": "add_rating", "endpoint": "user/productRating/add", "method": "POST"},
         {"actionId": "notify_availability", "endpoint": "user/productAvailabilityNotification/add", "method": "POST"},
         {"actionId": "list_notifications", "endpoint": "user/notification/list", "method": "POST"},
