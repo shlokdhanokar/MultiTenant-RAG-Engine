@@ -10,6 +10,13 @@ services:
         sync: false
       - key: MONGODB_DB_NAME
         sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
+      # Required even on Groq — embeddings are always Gemini.
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_CHAT_MODEL

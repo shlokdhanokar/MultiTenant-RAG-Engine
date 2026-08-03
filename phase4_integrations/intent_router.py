@@ -40,15 +40,13 @@ def get_connected_services(project_id):
 
 def build_tool_definitions(connected_services):
     """
-    Converts the connected services and their actions into Gemini
-    FunctionDeclarations.
+    Converts the connected services and their actions into provider-neutral
+    tool definitions, which llm_client translates for whichever LLM is active.
 
     Each action becomes one function the model can call. Names are namespaced
-    as "<serviceId>__<actionId>" so the flat function namespace Gemini exposes
-    can be mapped back to a specific service on the way out.
+    as "<serviceId>__<actionId>" so the flat function namespace these APIs
+    expose can be mapped back to a specific service on the way out.
     """
-    from google.genai import types
-
     declarations = []
 
     # Internal/automatic parameters that the user shouldn't be required to provide in chat.
@@ -66,9 +64,9 @@ def build_tool_definitions(connected_services):
             properties = {}
             for param in action.get("parameters", []):
                 if param in ("limit", "offset", "quantity", "totalAmount", "paidAmount", "deliveryCharge"):
-                    param_type = "NUMBER"
+                    param_type = "number"
                 else:
-                    param_type = "STRING"
+                    param_type = "string"
 
                 desc = f"The {param} value."
                 if param == "customerDeliveryAddressId":
@@ -85,16 +83,15 @@ def build_tool_definitions(connected_services):
                 if p not in NOT_REQUIRED_PARAMS
             ]
 
-            declaration = types.FunctionDeclaration(
-                name=f"{service['serviceId']}__{action['actionId']}",
-                description=f"{action['actionName']} via {service['serviceName']}. {action.get('description', '')}",
-                parameters={
-                    "type": "OBJECT",
+            declarations.append({
+                "name": f"{service['serviceId']}__{action['actionId']}",
+                "description": f"{action['actionName']} via {service['serviceName']}. {action.get('description', '')}",
+                "parameters": {
+                    "type": "object",
                     "properties": properties,
                     "required": required_params,
                 } if properties else None,
-            )
-            declarations.append(declaration)
+            })
 
     return declarations
 
@@ -115,7 +112,6 @@ def route_intent(query, project_id, project_config, chat_history=None):
             "parameters": <dict>       (if type == "action"),
         }
     """
-    from google.genai import types
     from llm_client import generate_text
 
     # 1. Check what services this project has connected
@@ -154,18 +150,18 @@ Only route to RAG (by returning normal text) if the user is asking a general kno
 
     contents.append({"role": "user", "parts": [{"text": query}]})
 
-    # 4. Call Gemini with function calling
+    # 4. Call the configured LLM with function calling
     try:
         response, _usage = generate_text(
             system_instruction=system_prompt,
             contents=contents,
-            tools=[types.Tool(function_declarations=declarations)],
+            tools=declarations,
             temperature=0.1,
             max_output_tokens=1000,
             operation="Intent Routing",
         )
     except Exception as e:
-        logger.error(f"  [INTENT] Gemini call failed: {e}")
+        logger.error(f"  [INTENT] Routing call failed: {e}")
         return {"type": "rag"}
 
     # 5. Check if the model decided to call a function

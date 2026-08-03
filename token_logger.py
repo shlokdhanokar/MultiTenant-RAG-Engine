@@ -9,7 +9,14 @@ logger = logging.getLogger(__name__)
 # prices; legacy OpenAI entries are retained so historical log rows and any
 # pre-migration chunks still cost out correctly.
 PRICING = {
-    # Gemini (current)
+    # Groq — free tier bills nothing. Listed at 0.0 so cost columns stay
+    # meaningful (a real 0) rather than falling through to the unknown-model
+    # default, which is also 0 but for the wrong reason.
+    "llama-3.3-70b-versatile": {"input": 0.0, "output": 0.0},
+    "llama-3.1-8b-instant": {"input": 0.0, "output": 0.0},
+    "openai/gpt-oss-120b": {"input": 0.0, "output": 0.0},
+    "openai/gpt-oss-20b": {"input": 0.0, "output": 0.0},
+    # Gemini
     "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
     "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},

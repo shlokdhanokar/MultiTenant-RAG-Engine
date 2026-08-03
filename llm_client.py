@@ -1,70 +1,238 @@
 """
-Central LLM client (Google Gemini).
+Provider-agnostic LLM client.
 
-Every model call in the app goes through this module so provider details —
-model names, embedding dimensions, retry policy, token accounting — live in
-one place instead of being duplicated across the phase packages.
+Generation is pluggable via LLM_PROVIDER (groq | gemini). Embeddings are always
+Gemini: Groq serves no embedding model, and mixing embedding providers would be
+worse than pinning one — vectors from different models occupy different spaces,
+so a knowledge base embedded by one provider is unreadable by another. Splitting
+generation from embeddings this way also means a generation-side outage or quota
+cap never invalidates the indexed corpus.
 
-Embeddings use asymmetric task types: documents are embedded with
-RETRIEVAL_DOCUMENT and queries with RETRIEVAL_QUERY. Gemini trains these as a
-matched pair, so a query vector lands closer to passages that *answer* it
-rather than passages that merely *resemble* it — a retrieval-quality gain that
-symmetric embedding models can't express.
+Callers never see provider types. Every path returns an LLMResponse exposing
+.text and .function_calls, so the phase packages stay provider-neutral and a
+provider swap is a config change rather than a code change.
 """
+import json
 import logging
 import os
 import time
 
-from google import genai
-from google.genai import types
-
 logger = logging.getLogger(__name__)
 
-CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
-EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+
+# Embeddings (Gemini only, regardless of PROVIDER)
+EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 # gemini-embedding-001 supports Matryoshka truncation (768 / 1536 / 3072).
-# 1536 keeps parity with the existing Atlas vector index while retaining
-# substantially more signal than 768.
+# Must match the Atlas vector index's numDimensions.
 EMBEDDING_DIMENSIONS = int(os.getenv("GEMINI_EMBEDDING_DIMENSIONS", "1536"))
 
-_client = None
+CHAT_MODEL = GROQ_CHAT_MODEL if PROVIDER == "groq" else GEMINI_CHAT_MODEL
 
-
-def get_client():
-    """Lazily construct the shared Gemini client."""
-    global _client
-    if _client is None:
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY not set in environment")
-        _client = genai.Client(api_key=api_key)
-    return _client
+_gemini_client = None
 
 
 class LLMError(Exception):
-    """Raised when a Gemini call fails after retries."""
+    """Raised when a generation or embedding call fails after retries."""
 
 
-def _usage(response, model):
-    """Normalize Gemini usage metadata into the app's token_info shape."""
-    usage = getattr(response, "usage_metadata", None)
-    if usage is None:
-        return {"model": model, "input_tokens": 0, "output_tokens": 0,
-                "total_tokens": 0, "cost_usd": 0.0}
+class FunctionCall:
+    """A tool call, normalized across providers."""
 
-    input_tokens = usage.prompt_token_count or 0
-    output_tokens = usage.candidates_token_count or 0
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args or {}
 
+    def __repr__(self):
+        return f"FunctionCall(name={self.name!r}, args={self.args!r})"
+
+
+class LLMResponse:
+    """
+    Normalized generation result.
+
+    .text            assistant text ("" when the model only called tools)
+    .function_calls  list[FunctionCall], empty when no tool was called
+    """
+
+    def __init__(self, text, function_calls=None):
+        self.text = text or ""
+        self.function_calls = function_calls or []
+
+
+def _gemini():
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise LLMError("GEMINI_API_KEY not set (required for embeddings)")
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
+
+
+def _usage(model, input_tokens, output_tokens, total_tokens=None):
     from token_logger import estimate_cost
     return {
         "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": usage.total_token_count or 0,
-        "cost_usd": estimate_cost(model, input_tokens, output_tokens),
+        "input_tokens": input_tokens or 0,
+        "output_tokens": output_tokens or 0,
+        "total_tokens": total_tokens if total_tokens is not None else (input_tokens or 0) + (output_tokens or 0),
+        "cost_usd": estimate_cost(model, input_tokens or 0, output_tokens or 0),
     }
 
+
+# ---------------------------------------------------------------- Groq
+
+def _groq_call(system_instruction, contents, temperature, max_output_tokens, json_mode, tools, model):
+    """
+    Groq speaks the OpenAI chat-completions dialect. Called over plain HTTP
+    rather than through an SDK — the surface used here (messages, JSON mode,
+    tools) is small and stable, and `requests` is already a dependency.
+    """
+    import requests
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise LLMError("GROQ_API_KEY not set")
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.extend(_to_openai_messages(contents))
+
+    payload = {
+        "model": model or GROQ_CHAT_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if max_output_tokens:
+        payload["max_tokens"] = max_output_tokens
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    if tools:
+        payload["tools"] = [
+            {"type": "function", "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+            }}
+            for t in tools
+        ]
+        payload["tool_choice"] = "auto"
+
+    resp = requests.post(
+        f"{GROQ_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+    if not resp.ok:
+        raise LLMError(f"Groq {resp.status_code}: {resp.text[:300]}")
+
+    body = resp.json()
+    choice = body["choices"][0]["message"]
+
+    calls = []
+    for tc in choice.get("tool_calls") or []:
+        raw = tc.get("function", {}).get("arguments") or "{}"
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError:
+            # A malformed argument blob is a failed tool call, not a failed
+            # request — drop it so the caller falls through to its non-tool path.
+            logger.error(f"Groq returned unparseable tool arguments: {raw[:200]}")
+            continue
+        calls.append(FunctionCall(tc["function"]["name"], args))
+
+    u = body.get("usage") or {}
+    return (
+        LLMResponse(choice.get("content"), calls),
+        _usage(payload["model"], u.get("prompt_tokens"), u.get("completion_tokens"), u.get("total_tokens")),
+    )
+
+
+def _to_openai_messages(contents):
+    """
+    Normalize the caller's `contents` into OpenAI-style messages.
+
+    Accepts a bare string, or the Gemini-shaped list the phase packages already
+    build ({"role": "user"|"model", "parts": [{"text": ...}]}), so callers don't
+    need provider-specific branches.
+    """
+    if contents is None:
+        return []
+    if isinstance(contents, str):
+        return [{"role": "user", "content": contents}]
+
+    out = []
+    for item in contents:
+        if isinstance(item, str):
+            out.append({"role": "user", "content": item})
+            continue
+        role = item.get("role", "user")
+        parts = item.get("parts") or []
+        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+        if not text:
+            text = item.get("content", "") or ""
+        out.append({"role": "assistant" if role == "model" else role, "content": text})
+    return out
+
+
+# ---------------------------------------------------------------- Gemini
+
+def _gemini_call(system_instruction, contents, temperature, max_output_tokens,
+                 json_mode, tools, model, thinking_budget):
+    from google.genai import types
+
+    cfg = {"temperature": temperature}
+    if system_instruction:
+        cfg["system_instruction"] = system_instruction
+    if max_output_tokens:
+        cfg["max_output_tokens"] = max_output_tokens
+    if json_mode:
+        cfg["response_mime_type"] = "application/json"
+    if tools:
+        cfg["tools"] = [types.Tool(function_declarations=[
+            types.FunctionDeclaration(
+                name=t["name"],
+                description=t.get("description", ""),
+                parameters=t.get("parameters") or None,
+            )
+            for t in tools
+        ])]
+    if thinking_budget is not None:
+        # Gemini 2.5 spends thinking tokens against max_output_tokens, so an
+        # unbounded budget on a tightly-capped call can consume the entire
+        # allowance and return empty text. Every task here is shallow enough
+        # not to need it.
+        cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+
+    raw = _gemini().models.generate_content(
+        model=model or GEMINI_CHAT_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(**cfg),
+    )
+
+    calls = [FunctionCall(c.name, dict(c.args) if c.args else {}) for c in (raw.function_calls or [])]
+    meta = getattr(raw, "usage_metadata", None)
+    return (
+        LLMResponse(raw.text if not calls else (raw.text or ""), calls),
+        _usage(
+            model or GEMINI_CHAT_MODEL,
+            getattr(meta, "prompt_token_count", 0),
+            getattr(meta, "candidates_token_count", 0),
+            getattr(meta, "total_token_count", None),
+        ),
+    )
+
+
+# ---------------------------------------------------------------- public API
 
 def generate_text(
     system_instruction=None,
@@ -74,50 +242,38 @@ def generate_text(
     json_mode=False,
     tools=None,
     model=None,
-    operation="Gemini Call",
+    operation="LLM Call",
     thinking_budget=0,
+    provider=None,
 ):
     """
-    Single entry point for text generation.
+    Single entry point for generation. Returns (LLMResponse, token_info).
 
-    Returns (response, token_info). The raw response is returned alongside the
-    token counts because callers need different things from it — plain text,
-    parsed JSON, or function calls.
+    `tools` is a list of provider-neutral dicts:
+        {"name": str, "description": str, "parameters": <JSON Schema object>}
 
-    thinking_budget defaults to 0. Gemini 2.5 models spend "thinking" tokens
-    before emitting output, and those count against max_output_tokens — so an
-    unbounded budget on a tightly-capped call can burn the entire allowance and
-    return empty text. Every task here (grounded extraction, JSON formatting,
-    intent routing) is shallow enough not to need it; raise it deliberately per
-    call if a task ever does.
+    Retries once on failure, then raises LLMError.
     """
-    client = get_client()
-    config_kwargs = {"temperature": temperature}
-    if system_instruction:
-        config_kwargs["system_instruction"] = system_instruction
-    if max_output_tokens:
-        config_kwargs["max_output_tokens"] = max_output_tokens
-    if json_mode:
-        config_kwargs["response_mime_type"] = "application/json"
-    if tools:
-        config_kwargs["tools"] = tools
-    if thinking_budget is not None:
-        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-
+    active = (provider or PROVIDER).lower()
     last_error = None
+
     for attempt in range(2):
         try:
-            response = client.models.generate_content(
-                model=model or CHAT_MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
-            token_info = _usage(response, model or CHAT_MODEL)
-            _log_usage(operation, model or CHAT_MODEL, token_info)
+            if active == "groq":
+                response, token_info = _groq_call(
+                    system_instruction, contents, temperature,
+                    max_output_tokens, json_mode, tools, model,
+                )
+            else:
+                response, token_info = _gemini_call(
+                    system_instruction, contents, temperature,
+                    max_output_tokens, json_mode, tools, model, thinking_budget,
+                )
+            _log_usage(operation, token_info["model"], token_info)
             return response, token_info
         except Exception as e:
             last_error = e
-            logger.error(f"{operation} failed (attempt {attempt + 1}/2): {e}")
+            logger.error(f"{operation} failed on {active} (attempt {attempt + 1}/2): {e}")
             if attempt == 0:
                 time.sleep(1)
 
@@ -126,21 +282,22 @@ def generate_text(
 
 def embed(text, task_type="RETRIEVAL_DOCUMENT", operation="Text Embedding"):
     """
-    Embed a single piece of text.
+    Embed text via Gemini, regardless of the configured generation provider.
 
     task_type must be RETRIEVAL_DOCUMENT when indexing content and
-    RETRIEVAL_QUERY when embedding a user question — mixing them up silently
-    degrades retrieval rather than raising, so callers should be explicit.
+    RETRIEVAL_QUERY when embedding a user question — Gemini trains these as a
+    matched pair, and mixing them up degrades retrieval silently rather than
+    raising.
 
-    Retries once, then raises. A zero-vector fallback would look like "nothing
+    Raises rather than returning a zero vector, which would rank as "nothing
     relevant found" instead of surfacing the outage.
     """
-    client = get_client()
+    from google.genai import types
 
     last_error = None
     for attempt in range(2):
         try:
-            response = client.models.embed_content(
+            response = _gemini().models.embed_content(
                 model=EMBEDDING_MODEL,
                 contents=text,
                 config=types.EmbedContentConfig(
@@ -156,8 +313,6 @@ def embed(text, task_type="RETRIEVAL_DOCUMENT", operation="Text Embedding"):
                 norm = sum(v * v for v in values) ** 0.5
                 if norm > 0:
                     values = [v / norm for v in values]
-
-            _log_usage(operation, EMBEDDING_MODEL, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
             return values
         except Exception as e:
             last_error = e
