@@ -6,10 +6,11 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Flask](https://img.shields.io/badge/Flask-Backend-green?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas_Vector_Search-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://mongodb.com)
-[![Gemini](https://img.shields.io/badge/Google-Gemini_2.5_Flash-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Groq](https://img.shields.io/badge/Groq-Llama_3.3_70B-F55036?style=for-the-badge&logo=meta&logoColor=white)](https://groq.com/)
+[![Gemini](https://img.shields.io/badge/Gemini-Embeddings-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
 [![Integrations](https://img.shields.io/badge/Integrations-Ready-8A2BE2?style=for-the-badge&logo=webhooks&logoColor=white)](#-app-integration-ecosystem)
 
-A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a range of external tools and APIs via native Gemini function calling.
+A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a range of external tools and APIs via native LLM function calling.
 
 [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
@@ -26,7 +27,9 @@ Build once, serve many. The architecture uses strict `project_id` / `knowledge_b
 Traditional PDF parsers lose context when extracting images. A custom algorithm records the exact **Y-Coordinate** of every heading and image, then dynamically "anchors" each image to the text physically appearing above it — eliminating the "leaking images" problem where media ends up attached to the wrong section.
 
 ### 🎯 Hybrid Retrieval, Grounded Generation
-Retrieval runs on Gemini `gemini-embedding-001` vectors through MongoDB Atlas Vector Search, with tenant isolation enforced **inside** the `$vectorSearch` stage via a native pre-filter — so a large tenant can never crowd a smaller one out of the candidate pool. Candidates are then re-ranked by blending semantic similarity with lexical overlap, which recovers exact-identifier matches (product codes, proper nouns, numbers) that pure dense retrieval tends to miss — without the latency of a cross-encoder. Generation runs on `gemini-2.5-flash` behind a strict grounding prompt: answer only from retrieved context, refuse in the user's own detected language when the answer isn't in the knowledge base, never fall back on outside knowledge.
+Retrieval runs on Gemini `gemini-embedding-001` vectors through MongoDB Atlas Vector Search, with tenant isolation enforced **inside** the `$vectorSearch` stage via a native pre-filter — so a large tenant can never crowd a smaller one out of the candidate pool. Candidates are then re-ranked by blending semantic similarity with lexical overlap, which recovers exact-identifier matches (product codes, proper nouns, numbers) that pure dense retrieval tends to miss — without the latency of a cross-encoder. Generation runs on Groq `llama-3.3-70b-versatile` behind a strict grounding prompt: answer only from retrieved context, refuse in the user's own detected language when the answer isn't in the knowledge base, never fall back on outside knowledge.
+
+The two halves are deliberately split across providers. Generation is pluggable via `LLM_PROVIDER` (`groq` | `gemini`), but embeddings are pinned to Gemini — vectors from different models occupy different spaces, so letting embeddings follow the generation provider would silently invalidate every indexed chunk on a switch. Pinning them means a generation-side outage or quota cap never touches the corpus.
 
 ### 📄 Multi-Format Ingestion
 One dispatcher routes each upload to a format-specific parser, all normalizing to a single layout shape so chunking, image anchoring, embedding, and storage stay format-agnostic:
@@ -45,7 +48,7 @@ Scanned PDFs are detected automatically (near-zero extractable text per page) an
 
 ## 🔗 App Integration Ecosystem
 
-The RAG Engine isn't just about reading documents — it's designed to take action. A registry-driven Gemini function-calling layer lets each tenant's bot decide, per query, whether to answer from the knowledge base or invoke a connected third-party action:
+The RAG Engine isn't just about reading documents — it's designed to take action. A registry-driven function-calling layer lets each tenant's bot decide, per query, whether to answer from the knowledge base or invoke a connected third-party action:
 
 - 📅 **Scheduling:** Google Calendar, Calendly
 - 🛒 **E-Commerce:** Shopify
@@ -80,7 +83,7 @@ graph TD
     subgraph Retrieval & Action Pipeline
         H{Intent Router}
         I[Atlas Vector Search]
-        K[Gemini 2.5 Flash Generator]
+        K[Groq Llama 3.3 70B]
         L[Third-Party App Integrations]
     end
 
@@ -105,7 +108,8 @@ graph TD
 ### Prerequisites
 - Python 3.11+
 - MongoDB Atlas cluster with a Vector Search index named `vector_index` on `chunks` (see Production Notes for the exact definition)
-- Google Gemini API key ([get one free](https://aistudio.google.com/apikey))
+- Groq API key ([free](https://console.groq.com/keys)) — generation
+- Google Gemini API key ([free](https://aistudio.google.com/apikey)) — embeddings (required even on Groq)
 
 ### 1. Installation
 ```bash
@@ -119,7 +123,9 @@ Copy `.env.example` to `.env` and fill in your own values:
 ```bash
 cp .env.example .env
 ```
-At minimum you need `MONGODB_URI`, `MONGODB_DB_NAME`, and `GEMINI_API_KEY`.
+At minimum you need `MONGODB_URI`, `MONGODB_DB_NAME`, `GROQ_API_KEY`, and `GEMINI_API_KEY`.
+
+Full deployment instructions are in [DEPLOY.md](DEPLOY.md).
 
 ### 3. Launch the Server
 ```bash
@@ -178,7 +184,7 @@ Serves images stored in MongoDB GridFS via a short-lived HMAC-signed URL. WhatsA
 ### 📊 6. Usage & Cost
 `GET /admin/usage` — header: `apikey: <master key>`
 
-Per-project token usage and estimated Gemini spend, aggregated from stored chat history. Optional `?project_id=<id>` to scope to one project.
+Per-project token usage and estimated spend, aggregated from stored chat history. Optional `?project_id=<id>` to scope to one project.
 
 ---
 
