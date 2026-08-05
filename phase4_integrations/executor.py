@@ -8,6 +8,9 @@ import sys
 import json
 import requests
 from datetime import datetime, timezone
+import logging
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from database import db
@@ -130,13 +133,13 @@ def execute_action(project_id, service_id, action_id, parameters):
     service_name = service["serviceName"] if service else service_id
     action_name = action_config.get("actionName", action_id)
 
-    print(f"  [EXEC] Executing: {service_name} -> {action_name}")
-    print(f"  [EXEC] Parameters: {json.dumps(parameters)}")
+    logger.info(f"  [EXEC] Executing: {service_name} -> {action_name}")
+    logger.info(f"  [EXEC] Parameters: {json.dumps(parameters)}")
 
     # 2. Get the authorization headers
     success, headers_or_error = _get_token_and_headers(project_id, service_id)
     if not success:
-        print(f"  [EXEC] Auth failed: {headers_or_error}")
+        logger.error(f"  [EXEC] Auth failed: {headers_or_error}")
         return {
             "success": False,
             "service": service_name,
@@ -177,7 +180,7 @@ def execute_action(project_id, service_id, action_id, parameters):
             response_data = {"raw": resp.text[:500]}
 
         if resp.status_code < 300:
-            print(f"  [EXEC] Success! Status: {resp.status_code}")
+            logger.info(f"  [EXEC] Success! Status: {resp.status_code}")
             return {
                 "success": True,
                 "service": service_name,
@@ -186,7 +189,7 @@ def execute_action(project_id, service_id, action_id, parameters):
                 "error": None
             }
         else:
-            print(f"  [EXEC] API returned error: {resp.status_code}")
+            logger.error(f"  [EXEC] API returned error: {resp.status_code}")
             return {
                 "success": False,
                 "service": service_name,
@@ -196,7 +199,7 @@ def execute_action(project_id, service_id, action_id, parameters):
             }
 
     except requests.RequestException as e:
-        print(f"  [EXEC] Request failed: {str(e)}")
+        logger.error(f"  [EXEC] Request failed: {str(e)}")
         return {
             "success": False,
             "service": service_name,

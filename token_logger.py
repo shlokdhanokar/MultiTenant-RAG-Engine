@@ -1,9 +1,27 @@
 import os
 import csv
 from datetime import datetime, timezone
+import logging
 
-# Pricing per 1M tokens as of May 2026
+logger = logging.getLogger(__name__)
+
+# Pricing in USD per 1M tokens. Gemini rates are the current paid-tier list
+# prices; legacy OpenAI entries are retained so historical log rows and any
+# pre-migration chunks still cost out correctly.
 PRICING = {
+    # Groq — free tier bills nothing. Listed at 0.0 so cost columns stay
+    # meaningful (a real 0) rather than falling through to the unknown-model
+    # default, which is also 0 but for the wrong reason.
+    "llama-3.3-70b-versatile": {"input": 0.0, "output": 0.0},
+    "llama-3.1-8b-instant": {"input": 0.0, "output": 0.0},
+    "openai/gpt-oss-120b": {"input": 0.0, "output": 0.0},
+    "openai/gpt-oss-20b": {"input": 0.0, "output": 0.0},
+    # Gemini
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-embedding-001": {"input": 0.15, "output": 0.0},
+    # OpenAI (legacy, pre-migration)
     "text-embedding-3-small": {"input": 0.02, "output": 0.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 5.0, "output": 15.0},
@@ -11,10 +29,20 @@ PRICING = {
 
 LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "openai_token_log.csv")
 
+
+def estimate_cost(model, prompt_tokens, completion_tokens=0):
+    """USD cost for a call, based on the PRICING table."""
+    pricing_info = PRICING.get(model, {"input": 0.0, "output": 0.0})
+    return (
+        (prompt_tokens / 1_000_000) * pricing_info.get("input", 0.0)
+        + (completion_tokens / 1_000_000) * pricing_info.get("output", 0.0)
+    )
+
+
 def log_openai_expenditure(operation, model, prompt_tokens, completion_tokens=0, total_tokens=0):
     """
-    Automatically logs OpenAI token usage and cost to a local CSV file.
-    Calculates cost based on model input/output rates.
+    Logs model token usage and cost to a local CSV file.
+    Named for historical reasons; covers whichever provider is configured.
     """
     now = datetime.now() # Local time
     date_str = now.strftime("%Y-%m-%d")
@@ -58,9 +86,9 @@ def log_openai_expenditure(operation, model, prompt_tokens, completion_tokens=0,
                 f"${cost:.6f}"
             ])
             
-        print(f"  [TOKEN LOGGER] Automatically logged: {operation} | {model} | Cost: ${cost:.6f}")
+        logger.info(f"  [TOKEN LOGGER] Automatically logged: {operation} | {model} | Cost: ${cost:.6f}")
     except Exception as e:
-        print(f"  [TOKEN LOGGER] Failed to write log: {e}")
+        logger.error(f"  [TOKEN LOGGER] Failed to write log: {e}")
         
     return cost
 
@@ -78,7 +106,7 @@ def backfill_weekly_logs():
     # now.weekday() returns 0 for Monday, 6 for Sunday
     start_of_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     
-    print(f"  [TOKEN LOGGER] Scanning MongoDB for RAG history since {start_of_week.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
+    logger.info(f"  [TOKEN LOGGER] Scanning MongoDB for RAG history since {start_of_week.strftime('%Y-%m-%d %H:%M:%S')} UTC...")
     
     # Find all sessions with messages
     sessions = db["chathistories"].find({"messages": {"$exists": True, "$not": {"$size": 0}}})
@@ -118,7 +146,7 @@ def backfill_weekly_logs():
                         count += 1
                         
     if not records:
-        print("  [TOKEN LOGGER] No historical logs found for this week in MongoDB.")
+        logger.info("  [TOKEN LOGGER] No historical logs found for this week in MongoDB.")
         return 0
         
     # Sort records chronologically
@@ -181,9 +209,9 @@ def backfill_weekly_logs():
                 ])
                 written += 1
                 
-        print(f"  [TOKEN LOGGER] Successfully restored {written} historical records from this week.")
+        logger.info(f"  [TOKEN LOGGER] Successfully restored {written} historical records from this week.")
     except Exception as e:
-        print(f"  [TOKEN LOGGER] Failed to backfill logs: {e}")
+        logger.error(f"  [TOKEN LOGGER] Failed to backfill logs: {e}")
         
     return written
 

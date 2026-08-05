@@ -1,14 +1,17 @@
 import fitz  # PyMuPDF
 import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def load_pdf_document(pdf_bytes: bytes):
-    """Loads a PDF from raw bytes in memory (no disk write needed)."""
+    """Loads a PDF from raw bytes in memory"""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         return doc
     except Exception as e:
-        print("failed to load pdf from memory:", e)
+        logger.error(f"failed to load pdf from memory: {e}")
         return None
 
 

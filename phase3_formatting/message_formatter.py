@@ -1,8 +1,9 @@
-import os
 import json
-from openai import OpenAI
+import logging
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from llm_client import generate_text
+
+logger = logging.getLogger(__name__)
 
 FORMAT_AGENT_SYSTEM_PROMPT = """You are a WhatsApp Message Formatting Agent for a RAG chatbot.
 Choose the BEST session message type and format the response.
@@ -85,26 +86,19 @@ AVAILABLE TEMPLATES: {json.dumps(templates)}
 USER NAME: {user_info.get('name', 'User')}
 Fill the best template with the RAG information."""
         try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": TEMPLATE_AGENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": template_message}
-                ],
-                response_format={"type": "json_object"}
+            resp, _usage = generate_text(
+                system_instruction=TEMPLATE_AGENT_SYSTEM_PROMPT,
+                contents=template_message,
+                temperature=0.2,
+                json_mode=True,
+                max_output_tokens=2000,
+                operation="Template Selection Agent",
             )
-            try:
-                usage = resp.usage
-                from token_logger import log_openai_expenditure
-                log_openai_expenditure("Template Selection Agent", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-            except Exception as log_err:
-                print(f"  [FORMATTER] Failed to log template selection tokens: {log_err}")
-                
-            result = json.loads(resp.choices[0].message.content)
+            result = json.loads(resp.text)
             chosen_type = result.get("template_type", "template")
             type_data = result
         except Exception as e:
-            print(f"  [FORMATTER] Template Error: {e}")
+            logger.error(f"  [FORMATTER] Template Error: {e}")
             chosen_type = "session_text"
             type_data = {}
     else:
@@ -119,24 +113,17 @@ Fill the best template with the RAG information."""
 
 Choose the best WhatsApp session type and format the response."""
         try:
-            resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": FORMAT_AGENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message.strip()}
-                ],
-                response_format={"type": "json_object"}
+            resp, _usage = generate_text(
+                system_instruction=FORMAT_AGENT_SYSTEM_PROMPT,
+                contents=user_message.strip(),
+                temperature=0.2,
+                json_mode=True,
+                max_output_tokens=2000,
+                operation="WhatsApp Formatting Agent",
             )
-            try:
-                usage = resp.usage
-                from token_logger import log_openai_expenditure
-                log_openai_expenditure("WhatsApp Formatting Agent", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-            except Exception as log_err:
-                print(f"  [FORMATTER] Failed to log formatter tokens: {log_err}")
-                
-            llm_output = json.loads(resp.choices[0].message.content)
+            llm_output = json.loads(resp.text)
         except Exception as e:
-            print(f"  [FORMATTER] LLM Error: {e}")
+            logger.error(f"  [FORMATTER] LLM Error: {e}")
             llm_output = {"chosen_type": "session_text", "text": rag_text}
 
         chosen_type = llm_output.get("chosen_type", "session_text")
@@ -262,7 +249,7 @@ Choose the best WhatsApp session type and format the response."""
         else:
             payload["text"] = rag_text
 
-    print(f"  [FORMATTER] Type: {payload['type']}")
+    logger.info(f"  [FORMATTER] Type: {payload['type']}")
     return payload, {}
 
 

@@ -1,7 +1,9 @@
 import os
-from openai import OpenAI
 from database import perform_semantic_retrieval
 from langdetect import detect
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Language code to full name mapping
 LANG_MAP = {
@@ -32,20 +34,89 @@ def detect_query_language(query):
     except Exception:
         return "English"
 
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Words too common to signal relevance — ignored when scoring keyword overlap.
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "have", "has", "had", "can", "could", "will",
+    "would", "should", "may", "might", "must", "of", "in", "on", "at",
+    "to", "for", "with", "from", "by", "about", "as", "into", "and",
+    "or", "but", "if", "then", "than", "so", "it", "its", "this", "that",
+    "these", "those", "there", "here", "what", "which", "who", "whom",
+    "how", "when", "where", "why", "you", "your", "i", "me", "my", "we",
+    "our", "they", "them", "their", "he", "she", "his", "her", "not",
+    "no", "yes", "any", "all", "some", "more", "most", "other", "please",
+    "tell", "give", "want", "need", "know",
+}
+
+
+def _tokenize(text):
+    """Lowercase alphanumeric tokens, stopwords removed."""
+    import re
+    tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return {t for t in tokens if t not in _STOPWORDS and len(t) > 2}
+
+
+def rerank_chunks(query, chunks, n=4, keyword_weight=0.3):
+    """
+    Re-ranks vector-search candidates by blending semantic similarity with
+    lexical overlap, then returns the top n.
+
+    Pure dense retrieval reliably captures paraphrase but can miss exact
+    identifiers — product codes, proper nouns, numbers — where the literal
+    token matters more than the surrounding semantics. Scoring keyword overlap
+    alongside the vector score recovers those cases without the latency or
+    cost of a cross-encoder / LLM reranker.
+
+    Vector scores are min-max normalized within the candidate set so the two
+    signals are comparable regardless of the absolute cosine range.
+    """
+    if not chunks:
+        return []
+
+    query_tokens = _tokenize(query)
+
+    vector_scores = [c.get("score", 0.0) or 0.0 for c in chunks]
+    lo, hi = min(vector_scores), max(vector_scores)
+    span = hi - lo
+
+    ranked = []
+    for chunk in chunks:
+        raw_vector = chunk.get("score", 0.0) or 0.0
+        # If every candidate scored identically, normalization is meaningless —
+        # treat them as equally strong rather than dividing by zero.
+        norm_vector = (raw_vector - lo) / span if span > 0 else 1.0
+
+        if query_tokens:
+            chunk_tokens = _tokenize(f"{chunk.get('topic_name', '')} {chunk.get('text', '')}")
+            keyword_score = len(query_tokens & chunk_tokens) / len(query_tokens)
+        else:
+            keyword_score = 0.0
+
+        combined = (1 - keyword_weight) * norm_vector + keyword_weight * keyword_score
+        chunk["vector_score"] = raw_vector
+        chunk["keyword_score"] = round(keyword_score, 4)
+        chunk["rerank_score"] = round(combined, 4)
+        ranked.append(chunk)
+
+    ranked.sort(key=lambda c: c["rerank_score"], reverse=True)
+    top = ranked[:n]
+    logger.info(
+        "  [RERANK] %d candidates -> top %d | best=%.4f (vec=%.4f kw=%.4f)",
+        len(chunks), len(top), top[0]["rerank_score"], top[0]["vector_score"], top[0]["keyword_score"]
+    )
+    return top
 
 def generate_rag_response(query, chunks, project_config, chat_history=None):
 
     """
-    Orchestrates the final call to OpenAI GPT-4o-mini using retrieved context and tenant rules.
+    Orchestrates the final Gemini call using retrieved context and tenant rules.
     Returns the AI text, tenant config, and token usage info.
     """
    
     
     # Detect language in Python — don't rely on LLM guessing
     detected_lang = detect_query_language(query)
-    print(f"  [LANG] Detected query language: {detected_lang}")
+    logger.info(f"  [LANG] Detected query language: {detected_lang}")
     
     # Construct context string with Image IDs included
     context_text = "\n\n".join([
@@ -86,72 +157,66 @@ USER QUERY:
 {query}
 """
     
-    messages = [{"role": "system", "content": system_prompt.strip()}]
-    
-    # Append previous chat history
+    # Gemini takes the system prompt as a separate argument rather than a
+    # message with role="system", and uses "model" where OpenAI uses "assistant".
+    contents = []
     if chat_history:
         for msg in chat_history:
-            # Map database 'sender' to AI 'role'
-            role = "user" if msg["sender"] == "user" else "assistant"
-            messages.append({"role": role, "content": msg["content"]})
-            
-    # Append the current query with context
-    messages.append({"role": "user", "content": user_message.strip()})
-    
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        max_tokens=500,  # Limit output to control cost
-        temperature=0.3,  # Lower temperature for factual, consistent answers
-    )
-    
-    ai_text = response.choices[0].message.content.strip()
-    usage = response.usage
-    
-    # Log token usage and cost
-    input_cost = (usage.prompt_tokens / 1_000_000) * 0.15
-    output_cost = (usage.completion_tokens / 1_000_000) * 0.60
-    total_cost = input_cost + output_cost
-    
-    token_info = {
-        "model": "gpt-4o-mini",
-        "input_tokens": usage.prompt_tokens,
-        "output_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-        "cost_usd": total_cost,
-    }
-    
-    print(f"  [TOKENS] RAG Response | Model: gpt-4o-mini")
-    print(f"           Input: {usage.prompt_tokens} | Output: {usage.completion_tokens} | Total: {usage.total_tokens}")
-    print(f"           Cost: ${total_cost:.6f}")
+            role = "user" if msg["sender"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
-    # Log to CSV automatically
+    contents.append({"role": "user", "parts": [{"text": user_message.strip()}]})
+
+    from llm_client import generate_text, LLMError
+
     try:
-        from token_logger import log_openai_expenditure
-        log_openai_expenditure("RAG Response", "gpt-4o-mini", usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
-    except Exception as e:
-        print(f"Failed to log RAG tokens to CSV: {e}")
-    
+        response, token_info = generate_text(
+            system_instruction=system_prompt.strip(),
+            contents=contents,
+            temperature=0.3,   # Lower temperature for factual, consistent answers
+            max_output_tokens=8000,
+            operation="RAG Response",
+        )
+    except LLMError as e:
+        raise GenerationError(str(e)) from e
+
+    ai_text = (response.text or "").strip()
+
+    logger.info(
+        f"  [TOKENS] RAG Response | {token_info['model']} | in={token_info['input_tokens']} "
+        f"out={token_info['output_tokens']} total={token_info['total_tokens']} "
+        f"cost=${token_info['cost_usd']:.6f}"
+    )
+
     return ai_text, project_config, token_info
 
 
-def generate_text_embedding(text):
+class EmbeddingGenerationError(Exception):
+    """Raised when embedding generation fails after retries."""
+
+
+class GenerationError(Exception):
+    """Raised when the chat model fails after retries."""
+
+
+def generate_text_embedding(text, task_type="RETRIEVAL_DOCUMENT"):
     """
-    Convert text into a 1536-dimensional vector using OpenAI's text-embedding-3-small.
+    Convert text into an embedding vector via Gemini.
+
+    Pass task_type="RETRIEVAL_QUERY" when embedding a user question and leave
+    the default when embedding knowledge-base content — Gemini trains these as
+    a matched pair, so mixing them up degrades retrieval quality silently.
+
+    Raises EmbeddingGenerationError on failure rather than returning a zero
+    vector, which would look like "nothing relevant found" instead of an outage.
     """
+    from llm_client import embed, LLMError
     try:
-        response = openai_client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text,
-        )
-        try:
-            usage = response.usage
-            from token_logger import log_openai_expenditure
-            log_openai_expenditure("Text Embedding", "text-embedding-3-small", usage.prompt_tokens, 0, usage.total_tokens)
-        except Exception as log_err:
-            print(f"Failed to log embedding tokens: {log_err}")
-            
-        return response.data[0].embedding
-    except Exception as e:
-        print(f"Embedding generation failed: {e}")
-        return [0.0] * 1536  # Fallback zero vector
+        return embed(text, task_type=task_type)
+    except LLMError as e:
+        raise EmbeddingGenerationError(str(e)) from e
+
+
+def generate_query_embedding(text):
+    """Embed a user query using the retrieval-query task type."""
+    return generate_text_embedding(text, task_type="RETRIEVAL_QUERY")

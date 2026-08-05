@@ -3,6 +3,9 @@ import os
 import uuid as _uuid
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env in this folder
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -78,10 +81,22 @@ def get_project_config(project_id):
     """
     return db["adminprojects"].find_one({"projectId": project_id})
 
-def perform_semantic_retrieval(query_embedding, knowledge_base_id, n=4):
+def perform_semantic_retrieval(query_embedding, knowledge_base_id, n=4, candidate_pool=None):
     """
-    Performs a vector search in MongoDB to find the most relevant context chunks.
+    Performs a tenant-scoped vector search to find the most relevant context chunks.
+
+    Tenant isolation is enforced INSIDE $vectorSearch via Atlas's native pre-filter
+    (knowledge_base_id is declared as a filter field on the vector_index). Filtering
+    after the ANN search instead would let a large tenant's chunks crowd a smaller
+    tenant out of the candidate pool entirely, returning zero results for them even
+    when relevant content exists.
+
+    Returns more candidates than requested (candidate_pool) so callers can re-rank
+    before truncating to n.
     """
+    if candidate_pool is None:
+        candidate_pool = max(n * 4, 15)
+
     chunks_collection = db["chunks"]
     pipeline = [
         {
@@ -89,21 +104,22 @@ def perform_semantic_retrieval(query_embedding, knowledge_base_id, n=4):
                 "index": "vector_index",
                 "path": "embedding",
                 "queryVector": query_embedding,
-                "numCandidates": 1000,
-                "limit": 1000
+                "numCandidates": max(candidate_pool * 10, 150),
+                "limit": candidate_pool,
+                "filter": {"knowledge_base_id": knowledge_base_id}
             }
-        },
-        {
-            "$match": {"knowledge_base_id": knowledge_base_id}
-        },
-        {
-            "$limit": n
         },
         {
             "$project": {
                 "text": 1,
                 "topic_name": 1,
                 "associated_image_ids": 1,
+                # chunk_index identifies a chunk downstream (re-rank selection,
+                # citations, UI keys) — without it those all collapse together.
+                "chunk_index": 1,
+                "source_file": 1,
+                "page_start": 1,
+                "page_end": 1,
                 "score": {"$meta": "vectorSearchScore"}
             }
         }
@@ -341,6 +357,49 @@ def clear_local_cart(session_id):
     )
 
 
+def get_usage_summary(admin_id, project_id=None):
+    """
+    Aggregates token usage and estimated cost per project from stored chat
+    messages (chathistories.messages already carry per-message token counts).
+    Costs are priced at the configured chat model's rate, since that's the only
+    model used for chat/RAG generation.
+    """
+    match_stage = {"adminId": admin_id}
+    if project_id:
+        match_stage["projectId"] = project_id
+
+    pipeline = [
+        {"$match": match_stage},
+        {"$unwind": "$messages"},
+        {
+            "$group": {
+                "_id": "$projectId",
+                "messageCount": {"$sum": 1},
+                "promptTokens": {"$sum": "$messages.promptTokens"},
+                "completionTokens": {"$sum": "$messages.completionTokens"},
+                "totalTokens": {"$sum": "$messages.totalTokens"},
+            }
+        },
+    ]
+    results = list(db["chathistories"].aggregate(pipeline))
+
+    from llm_client import CHAT_MODEL
+    from token_logger import estimate_cost
+
+    summary = []
+    for r in results:
+        cost = estimate_cost(CHAT_MODEL, r["promptTokens"], r["completionTokens"])
+        summary.append({
+            "projectId": r["_id"],
+            "messageCount": r["messageCount"],
+            "promptTokens": r["promptTokens"],
+            "completionTokens": r["completionTokens"],
+            "totalTokens": r["totalTokens"],
+            "estimatedCostUsd": round(cost, 6),
+        })
+    return summary
+
+
 def log_api_call(log_data):
     """
     Log an API request (incoming or outgoing) to the api_logs collection.
@@ -354,11 +413,11 @@ def log_api_call(log_data):
     try:
         db["api_logs"].insert_one(log_data)
     except Exception as e:
-        print(f"Failed to log API call: {e}")
+        logger.error(f"Failed to log API call: {e}")
 
 if __name__ == "__main__":
     try:
         client.admin.command('ping')
-        print("Connected to MongoDB!")
+        logger.info("Connected to MongoDB!")
     except Exception as e:
-        print("Failed:", e)
+        logger.error(f"Failed: {e}")

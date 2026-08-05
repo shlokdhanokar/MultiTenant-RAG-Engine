@@ -1,3 +1,4 @@
+from database import db, update_marketplace_state, generate_user_uuid, add_to_local_cart, get_local_cart, remove_from_local_cart, update_local_cart_quantity, get_marketplace_state, clear_local_cart
 """
 Phase 5 - Step B: Marketplace Authentication (Email OTP → JWT)
 Handles the OTP-based login flow where:
@@ -15,7 +16,6 @@ import requests
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from database import db, update_marketplace_state
 from phase4_integrations.marketplace_service import (
     load_marketplace_config,
     get_action_endpoint,
@@ -233,8 +233,6 @@ def verify_otp_and_authenticate(otp, session_id, marketplace_state):
                 or resp_data.get("data", {}).get("customer", {}).get("id")
                 or email  # Robust fallback to email if no ID is found in the response
             )
-
-            from database import generate_user_uuid
             new_user_id = generate_user_uuid(email)
 
             # Store encrypted token + auth flag in the session document and link it to the user's UUID
@@ -431,7 +429,6 @@ def execute_confirmed_cart_add(session, session_id, pending_cart):
     Saves the item to the LOCAL session-scoped cart (not the marketplace API).
     The marketplace cart API is only called during checkout.
     """
-    from database import add_to_local_cart
     print(f"  [MARKETPLACE] Adding to LOCAL cart: {pending_cart.get('product_name')}")
 
     product_name = pending_cart.get("product_name", "item")
@@ -744,7 +741,6 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
 
     # ── Cart: view_cart — use LOCAL session-scoped cart ──
     if action_id == "view_cart":
-        from database import get_local_cart
         cart = get_local_cart(session_id)
 
         if not cart:
@@ -788,7 +784,6 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
 
     # ── Cart: remove_from_cart — use LOCAL session-scoped cart ──
     if action_id == "remove_from_cart":
-        from database import remove_from_local_cart
         cart_id_param = parameters.get("cartId", "")
         try:
             idx = int(str(cart_id_param).strip())
@@ -809,7 +804,6 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
 
     # ── Cart: update_cart_quantity — use LOCAL session-scoped cart ──
     if action_id == "update_cart_quantity":
-        from database import update_local_cart_quantity
         cart_id_param = parameters.get("cartId", "")
         qty_param = parameters.get("quantity", 1)
         
@@ -844,6 +838,127 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
     if action_id == "list_orders":
         parameters.pop("customerId", None)
 
+    if action_id == "add_delivery_address":
+        if "latitude" not in parameters:
+            parameters["latitude"] = 28.7041
+        if "longitude" not in parameters:
+            parameters["longitude"] = 77.1025
+            
+    if action_id == "get_delivery_slots":
+        parameters["storeId"] = config.get("default_store_id")
+        if "date" not in parameters:
+            import datetime as _dt
+            parameters["date"] = _dt.date.today().isoformat()
+        parameters.setdefault("offset", 0)
+        parameters.setdefault("limit", 50)
+
+    if action_id == "calculate_delivery_charge":
+        cart = get_local_cart(session_id)
+        order_amount = sum(float(item.get("price", 0)) * float(item.get("quantity", 1)) for item in cart)
+        parameters["orderAmount"] = order_amount
+        parameters["storeId"] = config.get("default_store_id")
+
+    if action_id == "verify_coupon":
+        cart = get_local_cart(session_id)
+        cart_total = sum(float(item.get("price", 0)) * float(item.get("quantity", 1)) for item in cart)
+        parameters["cartTotal"] = cart_total
+
+    if action_id == "create_order":
+        import datetime
+        import base64
+        
+        cart = get_local_cart(session_id)
+        state = get_marketplace_state(session_id)
+        
+        # 1. Extract customerId from JWT token
+        customer_id = None
+        auth_header = headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload = parts[1]
+                # Add padding if needed
+                payload += "=" * ((4 - len(payload) % 4) % 4)
+                try:
+                    customer_id = base64.urlsafe_b64decode(payload).decode('utf-8')
+                    if customer_id and customer_id.startswith('"'):
+                        import json
+                        try:
+                            # It might be a JSON object, or just a raw string
+                            parsed = json.loads(customer_id)
+                            if isinstance(parsed, dict) and "id" in parsed:
+                                customer_id = parsed["id"]
+                            elif isinstance(parsed, str):
+                                customer_id = parsed
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"Error decoding JWT: {e}")
+                    
+        customer_phone = "+910000000000" # Fallback
+        
+        store_id = config.get("default_store_id")
+        base_url = config.get("base_url", "").rstrip("/")
+        
+        # 2. Sync Local Cart to Backend Cart
+        cart_add_url = f"{base_url}/user/cart/add"
+        for item in cart:
+            cart_payload = {
+                "productId": item.get("productId"),
+                "quantity": float(item.get("quantity", 1)),
+                "storeId": store_id,
+                "customerId": customer_id,
+                "customerPhone": customer_phone,
+                "productVarientUomId": item.get("productVarientUomId")
+            }
+            # Quietly hit cart/add to sync it for the backend
+            requests.post(cart_add_url, headers=headers, json=cart_payload)
+            
+        # 3. Construct the massive Order payload
+        cart_total = sum(float(item.get("price", 0)) * float(item.get("quantity", 1)) for item in cart)
+        del_charge = state.get("deliveryCharge", 0.0)
+        coupon_discount = state.get("couponDiscount", 0.0)
+        final_total = cart_total + del_charge - coupon_discount
+        
+        parameters["totalAmount"] = final_total
+        parameters["paymentType"] = parameters.get("paymentType", "COD")
+        parameters["customerPhone"] = customer_phone
+        parameters["customerId"] = customer_id
+        parameters["returnAmount"] = 0.0
+        parameters["paidAmount"] = final_total
+        parameters["orderType"] = "LIVE"
+        parameters["currencyId"] = config.get("currencyId", "e3d2f722-1b69-4b31-a350-0503159294e9") # Default from user payload
+        parameters["checkOrderTiming"] = False
+        
+        # Pull address/slot from state if not provided by LLM
+        parameters["customerDeliveryAddressId"] = parameters.get("customerDeliveryAddressId") or state.get("selectedAddressId")
+        parameters["deliverySlotId"] = parameters.get("deliverySlotId") or state.get("selectedSlotId")
+        parameters["deliverySlotName"] = parameters.get("deliverySlotName") or state.get("selectedSlotName", "")
+        
+        # The API returns empty timing sometimes but requires it to place an order
+        timing = parameters.get("deliverySlotTiming") or state.get("selectedSlotTiming", "")
+        if not timing:
+            timing = "10:00 AM - 6:00 PM" # Safe fallback
+        parameters["deliverySlotTiming"] = timing
+        
+        if "deliveryDate" not in parameters:
+            # Use the date the user explicitly selected, or fall back to today
+            selected_date = state.get("selectedDeliveryDate", "")
+            if selected_date:
+                parameters["deliveryDate"] = selected_date
+            else:
+                import datetime as _dt
+                parameters["deliveryDate"] = _dt.date.today().isoformat()
+            
+        parameters["convenienceFee"] = 0.0
+        parameters["deliveryCharge"] = del_charge
+        parameters["handlingCharges"] = 0.0
+        if state.get("appliedCoupon"):
+            parameters["couponCode"] = state.get("appliedCoupon")
+        elif "couponCode" in parameters:
+            del parameters["couponCode"]
+
     # Run it!
     method = action_schema.get("method", "GET").upper()
     base_url = config.get("base_url", "").rstrip("/")
@@ -861,22 +976,48 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
     }
 
     try:
-        if method == "GET":
+        if action_id == "list_wallets_and_transactions":
+            print(f"  [MARKETPLACE] WALLET Fetch -> {endpoint}")
+            # Make the first call for wallet balance
+            resp1 = requests.get(endpoint, headers=headers, params=parameters, timeout=15)
+            # Make the second call for transactions
+            tx_endpoint = f"{base_url}/customer/wallets/transactions"
+            print(f"  [MARKETPLACE] WALLET TX Fetch -> {tx_endpoint}")
+            resp2 = requests.get(tx_endpoint, headers=headers, params=parameters, timeout=15)
+            
+            print(f"  [MARKETPLACE] WALLET RESPS: {resp1.status_code}, {resp2.status_code}")
+            if resp1.status_code < 300 and resp2.status_code < 300:
+                exec_result["success"] = True
+                exec_result["data"] = {
+                    "wallet": resp1.json(),
+                    "transactions": resp2.json()
+                }
+            else:
+                exec_result["error"] = "Failed to fetch wallet details."
+                print(f"  [MARKETPLACE] Wallet error resp: {resp1.text[:100]} | {resp2.text[:100]}")
+                
+        elif method == "GET":
             resp = requests.get(endpoint, headers=headers, params=parameters, timeout=15)
         else:
             resp = requests.post(endpoint, headers=headers, json=parameters, timeout=15)
             
-        print(f"  [MARKETPLACE] Response: {resp.status_code}")
-        
-        if resp.status_code < 300:
-            exec_result["success"] = True
-            exec_result["data"] = resp.json()
-        else:
-            try:
-                error_data = resp.json()
-                exec_result["error"] = error_data.get("message", error_data.get("error", resp.text[:200]))
-            except Exception:
-                exec_result["error"] = resp.text[:200]
+        if action_id != "list_wallets_and_transactions":
+            print(f"  [MARKETPLACE] Response: {resp.status_code}")
+            
+            if resp.status_code < 300:
+                json_data = resp.json()
+                if isinstance(json_data, dict) and json_data.get("success") is False:
+                    # HTTP 200 but logical failure
+                    exec_result["error"] = json_data.get("message", json_data.get("error", "API Error"))
+                else:
+                    exec_result["success"] = True
+                    exec_result["data"] = json_data
+            else:
+                try:
+                    error_data = resp.json()
+                    exec_result["error"] = error_data.get("message", error_data.get("error", resp.text[:200]))
+                except Exception:
+                    exec_result["error"] = resp.text[:200]
     except Exception as e:
         exec_result["error"] = str(e)
     
@@ -1074,6 +1215,202 @@ def handle_marketplace_action(session, session_id, action_id, parameters):
                             final_message += f"   - {name} (x{qty:g})\n"
                             
                     final_message += "\n"
+
+        elif action_id == "list_delivery_addresses":
+            addresses = resp_data.get("data", {}).get("rows", [])
+            if not addresses:
+                final_message = "You don't have any saved delivery addresses yet. Tell me your address details (label, street, city, postal code) to add one!"
+            else:
+                # Save addresses to state for the state machine to use
+                addr_options = []
+                final_message = "Sure, let's checkout! Please choose your delivery address from the list below.\n\n📍 *Your Saved Addresses:*\n\n"
+                for idx, addr in enumerate(addresses, 1):
+                    label = addr.get("addressLabel", f"Address {idx}")
+                    street = addr.get("streetAddress", "")
+                    city = addr.get("city", "")
+                    state = addr.get("state", "")
+                    pincode = addr.get("postalCode", "")
+                    addr_id = addr.get("id", "")
+                    addr_options.append({"id": addr_id, "label": label, "index": idx})
+                    final_message += f"*{idx}. {label}*\n"
+                    final_message += f"{street}, {city}, {state} - {pincode}\n\n"
+                final_message += "Reply with the *number* of the address you want to use for delivery."
+                
+                # Set state so the next user reply is intercepted by the state machine
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_address_selection",
+                    "checkout_addresses": addr_options,
+                })
+
+        elif action_id == "add_delivery_address":
+            addr = resp_data.get("data", {})
+            label = addr.get("addressLabel", "New Address")
+            addr_id = addr.get("id", "")
+            final_message = f"✅ Successfully added your delivery address *{label}*!\n"
+            if addr_id:
+                final_message += f"`ID: {addr_id}`\n"
+            final_message += "\nYou can now use this address for checkout!"
+
+        elif action_id == "get_delivery_slots":
+            slots_data = resp_data.get("data", [])
+            if isinstance(slots_data, dict):
+                rows = slots_data.get("rows", [slots_data])
+            elif isinstance(slots_data, list):
+                rows = slots_data
+            else:
+                rows = []
+                
+            if not rows:
+                final_message = "No delivery slots are currently available for that date. Please try a different date."
+            else:
+                slot_options = []
+                final_message = "\u23F0 *Available Delivery Slots:*\n\n"
+                for idx, slot in enumerate(rows, 1):
+                    slot_id = slot.get("id", "")
+                    name = slot.get("slotName", f"Slot {idx}")
+                    start_time = slot.get("startTime", "")
+                    end_time = slot.get("endTime", "")
+                    # Build a human-readable timing string like "9:00 AM - 12:00 PM"
+                    if start_time and end_time:
+                        try:
+                            from datetime import datetime as _dtparse
+                            st = _dtparse.strptime(start_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
+                            et = _dtparse.strptime(end_time, "%H:%M").strftime("%I:%M %p").lstrip("0")
+                            timing = f"{st} - {et}"
+                        except Exception:
+                            timing = f"{start_time} - {end_time}"
+                    else:
+                        timing = slot.get("slotTiming", "")
+                    
+                    duration = slot.get("durationMinutes", "")
+                    fee = slot.get("deliveryCharge", 0)
+                    slot_options.append({
+                        "id": slot_id, "name": name, "timing": timing, "index": idx,
+                        "startTime": start_time, "endTime": end_time,
+                    })
+                    final_message += f"*{idx}. {name}*\n"
+                    if timing:
+                        final_message += f"   \u23F0 {timing}\n"
+                    if duration:
+                        final_message += f"   Duration: {duration} mins\n"
+                    if fee:
+                        final_message += f"   Delivery Fee: \u20B9{fee}\n"
+                    final_message += "\n"
+                final_message += "Reply with the *number* of the slot you'd like."
+                
+                # Set state so the next user reply is intercepted
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_slot_selection",
+                    "checkout_slots": slot_options,
+                })
+
+        elif action_id == "calculate_delivery_charge":
+            charge_data = resp_data.get("data", {})
+            charge = charge_data.get("deliveryCharge", 0.0)
+            distance = charge_data.get("distance", "Unknown")
+            
+            # Save it to marketplace state so create_order can use it!
+            update_marketplace_state(session_id, {"deliveryCharge": charge})
+            
+            final_message = f"🚚 *Shipping Calculation*\n\n"
+            final_message += f"Based on your selected address, the delivery charge is *${charge}*.\n\n"
+            final_message += "Would you like to check for coupons or proceed directly to Place Order?\n\n"
+            final_message += "Reply *coupons* or *place order*."
+            
+            # Set state so the next user reply is intercepted
+            update_marketplace_state(session_id, {
+                "current_step": "awaiting_checkout_decision",
+            })
+
+        elif action_id == "list_coupons":
+            coupons = resp_data.get("data", {}).get("rows", [])
+            if not coupons:
+                final_message = "No coupons are currently available."
+            else:
+                final_message = "🎟️ *Available Coupons:*\n\n"
+                for idx, coupon in enumerate(coupons, 1):
+                    code = coupon.get("code", "")
+                    name = coupon.get("name", "")
+                    desc = coupon.get("description", "")
+                    discount = coupon.get("discount", 0)
+                    is_pct = coupon.get("isPercentage", False)
+                    discount_str = f"{discount}%" if is_pct else f"${discount}"
+                    
+                    final_message += f"*{idx}. {name}* (Code: `{code}`)\n"
+                    final_message += f"   Discount: {discount_str}\n"
+                    final_message += f"   _{desc}_\n\n"
+                final_message += "Reply with the *coupon code* you want to apply, or say *skip* to proceed without a coupon."
+                
+                # Save coupon codes for state machine
+                coupon_codes = [c.get("code", "") for c in coupons]
+                update_marketplace_state(session_id, {
+                    "current_step": "awaiting_coupon_selection",
+                    "checkout_coupon_codes": coupon_codes,
+                })
+
+        elif action_id == "verify_coupon":
+            coupon_data = resp_data.get("data", {})
+            discount_amount = coupon_data.get("discountAmount", 0.0)
+            final_amount = coupon_data.get("finalAmount", 0.0)
+            code = parameters.get("couponCode", "the code")
+            
+            # Save the applied coupon to state
+            update_marketplace_state(session_id, {
+                "appliedCoupon": code,
+                "couponDiscount": discount_amount
+            })
+            
+            final_message = f"✅ *Coupon Applied!*\n\n"
+            final_message += f"You saved *${discount_amount}* by using `{code}`.\n"
+            final_message += f"Your new cart total is *${final_amount}*.\n\n"
+            final_message += "Reply *yes* to place your order, or *cancel* to abort."
+            
+            update_marketplace_state(session_id, {
+                "current_step": "awaiting_order_confirmation",
+            })
+
+        elif action_id == "create_order":
+            order_data = resp_data.get("data", {}).get("order", {})
+            order_number = order_data.get("orderNumber", "Unknown")
+            order_id = order_data.get("id", order_data.get("orderId", "N/A"))
+            order_status = order_data.get("orderStatus", "ORDER_PLACED")
+            payment_type = order_data.get("paymentType", "COD")
+            
+            # Clear the local cart on success!
+            clear_local_cart(session_id)
+            
+            if payment_type in ["ONLINE", "PREPAID", "PARTIAL"]:
+                payment_url = f"https://checkout.infoware.com/pay/{order_id}?session={session_id}"
+                
+                final_message = f"🎉 *Order Created!*\n\n"
+                final_message += f"Your order number is: *{order_number}*\n"
+                final_message += f"Total Amount: *${parameters.get('totalAmount', 0)}*\n\n"
+                final_message += f"Please complete your secure payment using the link below:\n👉 {payment_url}\n\n"
+                final_message += "Once paid, you will receive a confirmation message."
+            else:
+                final_message = f"🎉 *Order Placed Successfully!*\n\n"
+                final_message += f"Your order number is: *{order_number}*\n"
+                final_message += f"Status: {order_status}\n\n"
+                final_message += "Thank you for shopping with us! You can track your order status anytime by saying 'Track my orders'."
+
+        elif action_id == "list_wallets_and_transactions":
+            wallet_data = resp_data.get("wallet", {}).get("data", {})
+            balance = wallet_data.get("balance", 0.0)
+            status = wallet_data.get("status", "ACTIVE")
+            
+            final_message = f"💳 *Digital Wallet Balance: ${balance}* ({status})\n\n"
+            
+            transactions = resp_data.get("transactions", {}).get("data", [])
+            if not transactions:
+                final_message += "You don't have any recent wallet transactions."
+            else:
+                final_message += "*Recent Transactions:*\n"
+                for tx in transactions[:5]:
+                    date_str = tx.get("createdAt", "").split("T")[0]
+                    tx_type = "🟢 Added" if tx.get("type") == "CREDIT" else "🔴 Used"
+                    amt = tx.get("amount", 0)
+                    desc = tx.get("description", "")
+                    final_message += f"• {date_str}: {tx_type} ${amt} ({desc})\n"
 
     if final_message is None:
         # Fallback to the generic action formatter

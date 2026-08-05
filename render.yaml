@@ -1,0 +1,64 @@
+services:
+  - type: web
+    name: rag-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # 'free' spins the instance down after ~15 minutes idle, so the next
+    # visitor waits for a container boot before the app even starts warming.
+    # Move to 'starter' if the demo is being actively shared.
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Must be the deployed API's own https URL. Image links are HMAC-signed
+      # against it, so leaving the localhost default serves links no browser
+      # outside this machine can load.
+      - key: APP_BASE_URL
+        sync: false
+      # Comma-separated origins allowed to call /api/demo/* — set to the UI's
+      # deployed origin. Defaults to "*", which is fine for a public demo but
+      # worth narrowing.
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.3-70b-versatile
+      # Required even on Groq — embeddings are always Gemini.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_CHAT_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: GEMINI_EMBEDDING_DIMENSIONS
+        value: "1536"
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: IMAGE_URL_SIGNING_SECRET
+        sync: false
+      - key: MARKETPLACE_ENABLED
+        value: "false"
+      - key: MAX_API_KEYS_LIMIT
+        value: "5"
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: SHOPIFY_CLIENT_ID
+        sync: false
+      - key: SHOPIFY_CLIENT_SECRET
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: CALENDLY_CLIENT_ID
+        sync: false
+      - key: CALENDLY_CLIENT_SECRET
+        sync: false

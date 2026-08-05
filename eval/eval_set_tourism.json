@@ -1,0 +1,54 @@
+{
+  "knowledge_base_id": "537b3063-9ce9-4b51-9ffd-673b871d79e3",
+  "description": "Hand-written retrieval eval for the Sapphire Cove Resort (tourism) knowledge base. expected_topic is the chunk topic_name that should be retrieved for the question.",
+  "cases": [
+    {
+      "query": "Can I go scuba diving at the resort?",
+      "expected_topic": "Adventure, Wellness & Exploration"
+    },
+    {
+      "query": "Do you offer spa treatments and massages?",
+      "expected_topic": "Adventure, Wellness & Exploration"
+    },
+    {
+      "query": "What kind of food is served at the restaurants?",
+      "expected_topic": "A Culinary Journey by the Sea"
+    },
+    {
+      "query": "Is fresh seafood available for dinner?",
+      "expected_topic": "A Culinary Journey by the Sea"
+    },
+    {
+      "query": "Tell me about the beachfront villas",
+      "expected_topic": "Luxury Stays Designed for Every Traveler"
+    },
+    {
+      "query": "What room options do you have for families?",
+      "expected_topic": "Luxury Stays Designed for Every Traveler"
+    },
+    {
+      "query": "How do I get to the island from the airport?",
+      "expected_topic": "Plan Your Perfect Getaway"
+    },
+    {
+      "query": "What should I pack and what is the weather like?",
+      "expected_topic": "Plan Your Perfect Getaway"
+    },
+    {
+      "query": "How far in advance should I book excursions?",
+      "expected_topic": "Frequently Asked Questions"
+    },
+    {
+      "query": "What makes this island special?",
+      "expected_topic": "A Tropical Escape Like No Other"
+    },
+    {
+      "query": "Are there coral reefs and turquoise lagoons nearby?",
+      "expected_topic": "A Tropical Escape Like No Other"
+    },
+    {
+      "query": "Can I arrange a private dining experience?",
+      "expected_topic": "A Culinary Journey by the Sea"
+    }
+  ]
+}
