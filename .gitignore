@@ -56,3 +56,12 @@ test_practo_bypass.py
 
 # Local token/cost log — churns constantly, no value in history
 openai_token_log.csv
+
+# Credentials and keys — never commit
+*.pem
+*.key
+*.key.pub
+terraform/terraform.tfvars
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
