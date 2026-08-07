@@ -212,54 +212,6 @@ def save_chat_message(session_id, sender, content, token_info=None):
     )
 
 
-# ===== MARKETPLACE STATE MANAGEMENT =====
-
-def get_marketplace_state(session_id):
-    """
-    Retrieves the marketplace shopping state from the user's session.
-    Returns None if no marketplace state exists yet.
-    """
-    sessions = db["chathistories"]
-    session = sessions.find_one({"sessionId": session_id})
-    if not session:
-        return None
-    return session.get("marketplaceState")
-
-
-def update_marketplace_state(session_id, state_data):
-    """
-    Updates the marketplace shopping state on the user's session.
-    Merges the provided state_data into the existing marketplaceState.
-    """
-    from datetime import datetime, timezone
-    sessions = db["chathistories"]
-
-    # Build the $set dict by prefixing each key with "marketplaceState."
-    set_dict = {f"marketplaceState.{k}": v for k, v in state_data.items()}
-    set_dict["updatedAt"] = datetime.now(timezone.utc)
-
-    sessions.update_one(
-        {"sessionId": session_id},
-        {"$set": set_dict}
-    )
-
-
-def clear_marketplace_state(session_id):
-    """
-    Resets the marketplace state back to idle.
-    Called when user says 'cancel' or session expires.
-    """
-    from datetime import datetime, timezone
-    sessions = db["chathistories"]
-    sessions.update_one(
-        {"sessionId": session_id},
-        {
-            "$set": {
-                "marketplaceState": {"current_step": "idle"},
-                "updatedAt": datetime.now(timezone.utc),
-            }
-        }
-    )
 
 
 # ===== LOCAL SESSION-SCOPED CART =====

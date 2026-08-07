@@ -27,7 +27,7 @@ ui/dist/
 ui/node_modules/
 
 # ===== NEVER COMMIT: contains live credentials =====
-# Postman exports carry ~90 live Bearer JWTs for the marketplace API.
+# Postman exports carry ~90 live Bearer JWTs.
 *.postman_collection.json
 add_slots.py
 schema_fetcher.py

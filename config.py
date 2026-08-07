@@ -31,9 +31,4 @@ INTEGRATION_CREDENTIALS = {
         "clientSecret": os.getenv("CALENDLY_CLIENT_SECRET", ""),
         "redirectUri": OAUTH_REDIRECT_URI
     },
-    "marketplace": {
-        "baseUrl": os.getenv("MARKETPLACE_BASE_URL", ""),
-        "storeId": os.getenv("MARKETPLACE_DEFAULT_STORE_ID", ""),
-        "currencyId": os.getenv("MARKETPLACE_DEFAULT_CURRENCY_ID", ""),
-    }
 }

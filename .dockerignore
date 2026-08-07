@@ -14,8 +14,7 @@ knowledge_base/
 *.postman_collection.json
 rag-engine_backup_*.zip
 
-# Marketplace / out-of-scope legacy scripts — kept in the repo, not shipped in the image
-checkout_states.py
+# Ad-hoc scripts that are not part of the runtime image
 merge.py
 add_slots.py
 apply_places_api*.py

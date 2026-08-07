@@ -42,8 +42,6 @@ services:
         sync: false
       - key: IMAGE_URL_SIGNING_SECRET
         sync: false
-      - key: MARKETPLACE_ENABLED
-        value: "false"
       - key: MAX_API_KEYS_LIMIT
         value: "5"
       - key: GOOGLE_CLIENT_ID

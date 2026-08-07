@@ -39,29 +39,6 @@ def seed():
         
     print(f"Success! {count} services successfully seeded into MongoDB.")
 
-    # ── Seed Marketplace Service ──
-    print("\nSeeding Marketplace service...")
-    from phase4_integrations.marketplace_service import seed_marketplace_service
-    seed_marketplace_service()
-    print("Marketplace seeding complete!")
-
-
-def connect_marketplace(project_id, admin_id):
-    """
-    Helper to connect marketplace to a specific project.
-    Run after seeding to enable marketplace for a project.
-    """
-    from phase4_integrations.marketplace_service import connect_marketplace_to_project
-    connect_marketplace_to_project(project_id, admin_id)
-
 
 if __name__ == "__main__":
     seed()
-
-    # If command-line args are provided, connect marketplace to a project
-    if len(sys.argv) >= 3:
-        pid = sys.argv[1]
-        aid = sys.argv[2]
-        print(f"\nConnecting marketplace to project {pid}...")
-        connect_marketplace(pid, aid)
-

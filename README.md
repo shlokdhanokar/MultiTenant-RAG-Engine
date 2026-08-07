@@ -56,8 +56,6 @@ The RAG Engine isn't just about reading documents — it's designed to take acti
 
 Tools are built dynamically per tenant from whichever integrations that project has connected (OAuth or API key, credentials encrypted at rest) — nothing is hardcoded per integration; adding a new one is a registry entry, not new routing logic.
 
-*Note: an additional conversational-commerce module (checkout over a custom marketplace API) exists in `phase4_integrations/marketplace_*` but is intentionally disabled (`MARKETPLACE_ENABLED=false`) — it belongs to a separate product and is out of scope for this engine.*
-
 ---
 
 ## 🏗️ System Architecture
