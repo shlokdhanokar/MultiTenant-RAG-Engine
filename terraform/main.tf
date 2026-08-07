@@ -128,12 +128,10 @@ resource "oci_core_instance" "rag_instance" {
   compartment_id      = var.compartment_ocid
   display_name        = "rag-engine-instance"
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
-  shape               = "VM.Standard.A1.Flex"
-
-  shape_config {
-    ocpus         = 2
-    memory_in_gbs = 12
-  }
+  # x86 Always Free shape. Fixed at 1 OCPU / 1 GB, so it takes no shape_config
+  # block — but unlike A1.Flex it is not capacity-starved, so it provisions
+  # immediately instead of queueing behind "Out of host capacity".
+  shape = "VM.Standard.E2.1.Micro"
 
   create_vnic_details {
     subnet_id              = oci_core_subnet.rag_subnet.id
@@ -163,7 +161,9 @@ data "oci_core_images" "ubuntu" {
   compartment_id           = var.compartment_ocid
   operating_system         = "Canonical Ubuntu"
   operating_system_version = "22.04"
-  shape                    = "VM.Standard.A1.Flex"
+  # Must match the instance shape: filtering by A1.Flex returns aarch64 images,
+  # which will not boot on the x86 E2.1.Micro.
+  shape                    = "VM.Standard.E2.1.Micro"
   sort_by                  = "TIMECREATED"
 }
 
