@@ -1,8 +1,8 @@
 """
 Provider-agnostic LLM client.
 
-Generation is pluggable via LLM_PROVIDER (groq | gemini). Embeddings are always
-Gemini: Groq serves no embedding model, and mixing embedding providers would be
+Generation is pluggable via LLM_PROVIDER (groq | openai | gemini). Embeddings are
+always Gemini: Groq serves no embedding model, and mixing embedding providers would be
 worse than pinning one — vectors from different models occupy different spaces,
 so a knowledge base embedded by one provider is unreadable by another. Splitting
 generation from embeddings this way also means a generation-side outage or quota
@@ -24,7 +24,18 @@ PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
 GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+
+# Providers that speak the OpenAI chat-completions dialect share one code path;
+# they differ only in endpoint, key, and default model.
+#   provider -> (base_url, api_key_env, default_model)
+OPENAI_COMPATIBLE = {
+    "groq": (GROQ_BASE_URL, "GROQ_API_KEY", GROQ_CHAT_MODEL),
+    "openai": (OPENAI_BASE_URL, "OPENAI_API_KEY", OPENAI_CHAT_MODEL),
+}
 
 # Embeddings (Gemini only, regardless of PROVIDER)
 EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
@@ -32,10 +43,12 @@ EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 # Must match the Atlas vector index's numDimensions.
 EMBEDDING_DIMENSIONS = int(os.getenv("GEMINI_EMBEDDING_DIMENSIONS", "1536"))
 
-CHAT_MODEL = GROQ_CHAT_MODEL if PROVIDER == "groq" else GEMINI_CHAT_MODEL
+CHAT_MODEL = (
+    OPENAI_COMPATIBLE[PROVIDER][2] if PROVIDER in OPENAI_COMPATIBLE else GEMINI_CHAT_MODEL
+)
 
 _gemini_client = None
-_groq_session = None
+_http_session_obj = None
 
 
 class LLMError(Exception):
@@ -77,17 +90,17 @@ def _gemini():
     return _gemini_client
 
 
-def _groq_http():
+def _http_session():
     """
     A module-level Session so the TLS connection is reused across calls.
     A fresh `requests.post` renegotiates TLS every time, which on a
     high-latency link costs more than the generation itself.
     """
-    global _groq_session
-    if _groq_session is None:
+    global _http_session_obj
+    if _http_session_obj is None:
         import requests
-        _groq_session = requests.Session()
-    return _groq_session
+        _http_session_obj = requests.Session()
+    return _http_session_obj
 
 
 def prewarm():
@@ -105,19 +118,22 @@ def prewarm():
     except Exception as e:
         logger.warning(f"  [PREWARM] embedding warmup failed (non-fatal): {e}")
 
-    if PROVIDER == "groq":
+    if PROVIDER in OPENAI_COMPATIBLE:
+        base_url, key_env, _ = OPENAI_COMPATIBLE[PROVIDER]
         try:
             t = time.perf_counter()
-            api_key = os.getenv("GROQ_API_KEY")
+            api_key = os.getenv(key_env)
             if api_key:
-                _groq_http().get(
-                    f"{GROQ_BASE_URL}/models",
+                _http_session().get(
+                    f"{base_url}/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                     timeout=30,
                 )
-                logger.info(f"  [PREWARM] groq ready in {(time.perf_counter() - t) * 1000:.0f}ms")
+                logger.info(
+                    f"  [PREWARM] {PROVIDER} ready in {(time.perf_counter() - t) * 1000:.0f}ms"
+                )
         except Exception as e:
-            logger.warning(f"  [PREWARM] groq warmup failed (non-fatal): {e}")
+            logger.warning(f"  [PREWARM] {PROVIDER} warmup failed (non-fatal): {e}")
 
 
 def _usage(model, input_tokens, output_tokens, total_tokens=None):
@@ -131,17 +147,22 @@ def _usage(model, input_tokens, output_tokens, total_tokens=None):
     }
 
 
-# ---------------------------------------------------------------- Groq
+# ------------------------------------------------- OpenAI-compatible (Groq, OpenAI)
 
-def _groq_call(system_instruction, contents, temperature, max_output_tokens, json_mode, tools, model):
+def _openai_compatible_call(
+    provider, system_instruction, contents, temperature, max_output_tokens, json_mode, tools, model
+):
     """
-    Groq speaks the OpenAI chat-completions dialect. Called over plain HTTP
-    rather than through an SDK — the surface used here (messages, JSON mode,
-    tools) is small and stable, and `requests` is already a dependency.
+    Shared path for every provider speaking the OpenAI chat-completions dialect
+    (Groq, OpenAI). Called over plain HTTP rather than through an SDK — the
+    surface used here (messages, JSON mode, tools) is small and stable, and
+    `requests` is already a dependency.
     """
-    api_key = os.getenv("GROQ_API_KEY")
+    base_url, key_env, default_model = OPENAI_COMPATIBLE[provider]
+
+    api_key = os.getenv(key_env)
     if not api_key:
-        raise LLMError("GROQ_API_KEY not set")
+        raise LLMError(f"{key_env} not set")
 
     messages = []
     if system_instruction:
@@ -149,7 +170,7 @@ def _groq_call(system_instruction, contents, temperature, max_output_tokens, jso
     messages.extend(_to_openai_messages(contents))
 
     payload = {
-        "model": model or GROQ_CHAT_MODEL,
+        "model": model or default_model,
         "messages": messages,
         "temperature": temperature,
     }
@@ -168,14 +189,14 @@ def _groq_call(system_instruction, contents, temperature, max_output_tokens, jso
         ]
         payload["tool_choice"] = "auto"
 
-    resp = _groq_http().post(
-        f"{GROQ_BASE_URL}/chat/completions",
+    resp = _http_session().post(
+        f"{base_url}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=payload,
         timeout=120,
     )
     if not resp.ok:
-        raise LLMError(f"Groq {resp.status_code}: {resp.text[:300]}")
+        raise LLMError(f"{provider} {resp.status_code}: {resp.text[:300]}")
 
     body = resp.json()
     choice = body["choices"][0]["message"]
@@ -188,7 +209,7 @@ def _groq_call(system_instruction, contents, temperature, max_output_tokens, jso
         except json.JSONDecodeError:
             # A malformed argument blob is a failed tool call, not a failed
             # request — drop it so the caller falls through to its non-tool path.
-            logger.error(f"Groq returned unparseable tool arguments: {raw[:200]}")
+            logger.error(f"{provider} returned unparseable tool arguments: {raw[:200]}")
             continue
         calls.append(FunctionCall(tc["function"]["name"], args))
 
@@ -301,9 +322,9 @@ def generate_text(
 
     for attempt in range(2):
         try:
-            if active == "groq":
-                response, token_info = _groq_call(
-                    system_instruction, contents, temperature,
+            if active in OPENAI_COMPATIBLE:
+                response, token_info = _openai_compatible_call(
+                    active, system_instruction, contents, temperature,
                     max_output_tokens, json_mode, tools, model,
                 )
             else:
