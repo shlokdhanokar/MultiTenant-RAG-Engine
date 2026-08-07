@@ -7,6 +7,13 @@ API has to exist first.
 Everything below has been verified locally: the image builds, the container
 boots under Gunicorn, and a grounded chat returns through it in ~1.2s.
 
+> **This document covers the Render + Vercel route.** The live demo at
+> <https://multi-tenant-rag.duckdns.org> runs a different one — a single Oracle
+> Cloud Always Free VM serving the API and UI from one nginx origin, with TLS
+> terminated on the host. That path is free, has no cold starts, and is
+> documented in [terraform/README.md](terraform/README.md). Prefer it unless you
+> specifically want managed hosting.
+
 ---
 
 ## Prerequisites
@@ -15,8 +22,8 @@ boots under Gunicorn, and a grounded chat returns through it in ~1.2s.
 |---|---|---|
 | MongoDB Atlas cluster | cloud.mongodb.com | Free M0 is enough |
 | Atlas Vector Search index | Atlas UI | Definition below — **the app returns nothing without it** |
-| Groq API key | console.groq.com/keys | Free, no card |
-| Gemini API key | aistudio.google.com/apikey | Free. Required even on Groq — embeddings are Gemini-only |
+| Gemini API key | aistudio.google.com/apikey | Free. Required always — embeddings are Gemini-only, and it generates too on the default `LLM_PROVIDER=gemini` |
+| Groq / OpenAI key | console.groq.com/keys · platform.openai.com | Optional, only if you switch `LLM_PROVIDER` |
 
 ### Atlas Vector Search index
 
@@ -54,8 +61,8 @@ A cluster that only allows your laptop's IP will refuse the deployed container.
 |---|---|
 | `MONGODB_URI` | `mongodb+srv://…` |
 | `MONGODB_DB_NAME` | `rag_db` |
-| `GROQ_API_KEY` | from console.groq.com |
 | `GEMINI_API_KEY` | from aistudio.google.com |
+| `LLM_PROVIDER` | `gemini` (default) |
 | `CREDENTIAL_ENCRYPTION_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `IMAGE_URL_SIGNING_SECRET` | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `APP_BASE_URL` | **the service's own https URL** (see below) |
@@ -137,4 +144,5 @@ docker run --rm --env-file .env -p 8000:8000 rag-engine
 | Browser console CORS errors | `VITE_API_BASE` doesn't match the API's actual origin |
 | First request ~25s, later ones fast | Free-tier cold start — expected |
 | `ServerSelectionTimeoutError` in logs | Atlas Network Access doesn't allow the host |
-| 429 from Groq | Free tier is ~1,000 requests/day |
+| 429 during a demo | You are on `LLM_PROVIDER=groq`: its free tier is 12k tokens/min and one RAG call costs ~9k. Switch to `gemini` (~250k/min). |
+| 429 `insufficient_quota` from OpenAI | The key is valid but has no billing credits — OpenAI has no free generation tier. |

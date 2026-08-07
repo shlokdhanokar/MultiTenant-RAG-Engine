@@ -67,7 +67,6 @@ chmod +x deploy.sh
 
 When prompted, edit `.env` with:
 - `MONGODB_URI` — Your MongoDB Atlas connection string
-- `GROQ_API_KEY` — From [console.groq.com](https://console.groq.com)
 - `GEMINI_API_KEY` — From [aistudio.google.com](https://aistudio.google.com)
 - `APP_BASE_URL` — Your public IP or domain
 

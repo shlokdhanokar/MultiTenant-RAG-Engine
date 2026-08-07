@@ -6,13 +6,15 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Flask](https://img.shields.io/badge/Flask-Backend-green?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas_Vector_Search-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://mongodb.com)
-[![Groq](https://img.shields.io/badge/Groq-Llama_3.3_70B-F55036?style=for-the-badge&logo=meta&logoColor=white)](https://groq.com/)
-[![Gemini](https://img.shields.io/badge/Gemini-Embeddings-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Gemini](https://img.shields.io/badge/Gemini-Generation_%2B_Embeddings-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Providers](https://img.shields.io/badge/LLM-Groq_%7C_OpenAI_%7C_Gemini-F55036?style=for-the-badge&logo=meta&logoColor=white)](#-hybrid-retrieval-grounded-generation)
 [![Integrations](https://img.shields.io/badge/Integrations-Ready-8A2BE2?style=for-the-badge&logo=webhooks&logoColor=white)](#-app-integration-ecosystem)
+
+[![Live Demo](https://img.shields.io/badge/▶_Live_Demo-multi--tenant--rag.duckdns.org-success?style=for-the-badge)](https://multi-tenant-rag.duckdns.org)
 
 A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a range of external tools and APIs via native LLM function calling.
 
-[Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
+[Live Demo](https://multi-tenant-rag.duckdns.org) • [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
 
 
@@ -27,9 +29,13 @@ Build once, serve many. The architecture uses strict `project_id` / `knowledge_b
 Traditional PDF parsers lose context when extracting images. A custom algorithm records the exact **Y-Coordinate** of every heading and image, then dynamically "anchors" each image to the text physically appearing above it — eliminating the "leaking images" problem where media ends up attached to the wrong section.
 
 ### 🎯 Hybrid Retrieval, Grounded Generation
-Retrieval runs on Gemini `gemini-embedding-001` vectors through MongoDB Atlas Vector Search, with tenant isolation enforced **inside** the `$vectorSearch` stage via a native pre-filter — so a large tenant can never crowd a smaller one out of the candidate pool. Candidates are then re-ranked by blending semantic similarity with lexical overlap, which recovers exact-identifier matches (product codes, proper nouns, numbers) that pure dense retrieval tends to miss — without the latency of a cross-encoder. Generation runs on Groq `llama-3.3-70b-versatile` behind a strict grounding prompt: answer only from retrieved context, refuse in the user's own detected language when the answer isn't in the knowledge base, never fall back on outside knowledge.
+Retrieval runs on Gemini `gemini-embedding-001` vectors through MongoDB Atlas Vector Search, with tenant isolation enforced **inside** the `$vectorSearch` stage via a native pre-filter — so a large tenant can never crowd a smaller one out of the candidate pool. Candidates are then re-ranked by blending semantic similarity with lexical overlap, which recovers exact-identifier matches (product codes, proper nouns, numbers) that pure dense retrieval tends to miss — without the latency of a cross-encoder. Generation runs on Gemini `gemini-2.5-flash` behind a strict grounding prompt: answer only from retrieved context, refuse in the user's own detected language when the answer isn't in the knowledge base, never fall back on outside knowledge.
 
-The two halves are deliberately split across providers. Generation is pluggable via `LLM_PROVIDER` (`groq` | `openai` | `gemini`) — Groq and OpenAI share one code path, since Groq speaks the OpenAI chat-completions dialect — but embeddings are pinned to Gemini — vectors from different models occupy different spaces, so letting embeddings follow the generation provider would silently invalidate every indexed chunk on a switch. Pinning them means a generation-side outage or quota cap never touches the corpus.
+Generation is pluggable via `LLM_PROVIDER` (`gemini` | `groq` | `openai`); Groq and OpenAI share a single code path, since Groq speaks the OpenAI chat-completions dialect and differs only in endpoint, key, and model.
+
+Embeddings, by contrast, are pinned to Gemini no matter which provider generates. Vectors from different models occupy different spaces, so letting embeddings follow the generation provider would silently invalidate every indexed chunk the moment you switched — old vectors return confident nonsense rather than failing loudly. Pinning them means a generation-side outage or quota cap never touches the corpus.
+
+The default is `gemini` for a practical reason: a single RAG call spends roughly 9k tokens on retrieved context, and Groq's free tier allows 12k tokens per minute — enough to rate-limit after about one query every 45 seconds. Gemini's free tier is roughly 250k tokens per minute, which is the difference between a demo that survives an audience and one that doesn't.
 
 ### 📄 Multi-Format Ingestion
 One dispatcher routes each upload to a format-specific parser, all normalizing to a single layout shape so chunking, image anchoring, embedding, and storage stay format-agnostic:
@@ -81,7 +87,7 @@ graph TD
     subgraph Retrieval & Action Pipeline
         H{Intent Router}
         I[Atlas Vector Search]
-        K[Groq Llama 3.3 70B]
+        K[LLM: Gemini / Groq / OpenAI]
         L[Third-Party App Integrations]
     end
 
@@ -106,8 +112,8 @@ graph TD
 ### Prerequisites
 - Python 3.11+
 - MongoDB Atlas cluster with a Vector Search index named `vector_index` on `chunks` (see Production Notes for the exact definition)
-- Groq API key ([free](https://console.groq.com/keys)) — generation
-- Google Gemini API key ([free](https://aistudio.google.com/apikey)) — embeddings (required even on Groq)
+- Google Gemini API key ([free](https://aistudio.google.com/apikey)) — embeddings, and generation on the default `LLM_PROVIDER=gemini`
+- Optionally a Groq ([free](https://console.groq.com/keys)) or OpenAI key, if you switch generation providers
 
 ### 1. Installation
 ```bash
@@ -121,7 +127,7 @@ Copy `.env.example` to `.env` and fill in your own values:
 ```bash
 cp .env.example .env
 ```
-At minimum you need `MONGODB_URI`, `MONGODB_DB_NAME`, `GROQ_API_KEY`, and `GEMINI_API_KEY`.
+At minimum you need `MONGODB_URI`, `MONGODB_DB_NAME`, and `GEMINI_API_KEY`.
 
 Full deployment instructions are in [DEPLOY.md](DEPLOY.md).
 
