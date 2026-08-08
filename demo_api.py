@@ -4,8 +4,9 @@ Public demo API powering the showcase UI.
 These endpoints are deliberately unauthenticated: the UI is a public
 demonstration, and requiring visitors to obtain an API key defeats the point.
 Safety comes from scope rather than auth — the routes only ever touch projects
-explicitly registered as demo projects, they are aggressively rate limited, and
-visitor uploads land in ephemeral projects that expire.
+explicitly registered as demo projects, every route carries a rate limit priced
+to what it costs to serve, and visitor uploads land in ephemeral projects that
+expire.
 
 Beyond answering questions, most endpoints also return the pipeline's internal
 state (candidate scores, stage timings, token accounting) so the UI can show
@@ -20,10 +21,19 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, abort, jsonify, request
 
 from database import db
+from rate_limit import limiter, shared_budget
 
 logger = logging.getLogger(__name__)
 
 demo_bp = Blueprint("demo", __name__, url_prefix="/api/demo")
+
+# Every route below carries its own limit, priced by what it costs to serve
+# rather than by one blanket number: a /stats call is a single indexed read,
+# while /upload runs a parse, N embedding calls and a GridFS write on a 1-OCPU
+# box. The expensive ones additionally share a budget keyed by shared_budget(),
+# which is what bounds total spend when per-caller identity is unreliable —
+# see rate_limit.client_key for why it can be.
+_CHEAP_READ = "60 per minute"
 
 # Visitor-created knowledge bases are disposable; without a TTL the demo
 # database would grow without bound.
@@ -57,6 +67,7 @@ def _resolve_project(project_id):
 
 
 @demo_bp.route("/tenants", methods=["GET"])
+@limiter.limit(_CHEAP_READ)
 def list_tenants():
     """
     Backs the multi-tenant switcher: several isolated knowledge bases served by
@@ -70,6 +81,7 @@ def list_tenants():
 
 
 @demo_bp.route("/chunks/<project_id>", methods=["GET"])
+@limiter.limit("30 per minute")
 def list_chunks(project_id):
     """
     Chunk explorer: how a document was split, the heading hierarchy that drove
@@ -131,6 +143,7 @@ _INLINE_TYPES = {
 
 
 @demo_bp.route("/documents/<project_id>", methods=["GET"])
+@limiter.limit("30 per minute")
 def list_documents(project_id):
     """
     The source documents behind a knowledge base, with enough metadata for the
@@ -172,6 +185,8 @@ def list_documents(project_id):
 
 
 @demo_bp.route("/document/<project_id>/<path:source_file>", methods=["GET"])
+@limiter.limit("20 per minute")
+@limiter.limit("400 per hour", key_func=shared_budget)
 def get_document(project_id, source_file):
     """
     Streams the original uploaded file out of GridFS so the UI can preview the
@@ -262,6 +277,8 @@ def _retrieve_with_trace(query, project_id):
 
 
 @demo_bp.route("/chat", methods=["POST"])
+@limiter.limit("10 per minute;100 per hour")
+@limiter.limit("500 per hour", key_func=shared_budget)
 def demo_chat():
     """
     The instrumented chat call. Returns the grounded answer plus everything the
@@ -345,6 +362,8 @@ def demo_chat():
 
 
 @demo_bp.route("/compare", methods=["POST"])
+@limiter.limit("5 per minute;40 per hour")
+@limiter.limit("200 per hour", key_func=shared_budget)
 def demo_compare():
     """
     Runs the same question with and without retrieval.
@@ -408,6 +427,8 @@ def demo_compare():
 
 
 @demo_bp.route("/projection/<project_id>", methods=["GET"])
+@limiter.limit("10 per minute")
+@limiter.limit("300 per hour", key_func=shared_budget)
 def embedding_projection(project_id):
     """
     Projects the knowledge base's embeddings to 2D via PCA so the UI can render
@@ -462,6 +483,8 @@ _PROJECTION_CACHE = {}
 
 
 @demo_bp.route("/projection/<project_id>/query", methods=["POST"])
+@limiter.limit("20 per minute")
+@limiter.limit("600 per hour", key_func=shared_budget)
 def project_query(project_id):
     """Maps a live query into the cached 2D basis from /projection."""
     import numpy as np
@@ -487,6 +510,8 @@ def project_query(project_id):
 
 
 @demo_bp.route("/eval/<project_id>", methods=["GET"])
+@limiter.limit("5 per minute;30 per hour")
+@limiter.limit("150 per hour", key_func=shared_budget)
 def run_eval(project_id):
     """
     Runs the stored evaluation set and reports Hit@1 / Hit@3 / MRR for
@@ -548,6 +573,8 @@ def run_eval(project_id):
 
 
 @demo_bp.route("/upload", methods=["POST"])
+@limiter.limit("3 per hour;10 per day")
+@limiter.limit("60 per hour", key_func=shared_budget)
 def demo_upload():
     """
     Ingests a visitor's own document into a throwaway knowledge base so they can
@@ -650,6 +677,7 @@ def demo_upload():
 
 
 @demo_bp.route("/stats", methods=["GET"])
+@limiter.limit(_CHEAP_READ)
 def demo_stats():
     """Headline numbers for the landing view."""
     from llm_client import CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS

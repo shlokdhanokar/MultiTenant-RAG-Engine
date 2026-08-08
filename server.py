@@ -119,6 +119,15 @@ _start_prewarm()
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB upload cap
 
+# Deployed behind nginx (and, for the public demo, behind Vercel in front of
+# that), so without this every request appears to come from 127.0.0.1 over
+# http. Only x_for=1 is trusted: that is the one hop this app can vouch for,
+# nginx, which overwrites the header with its own peer. Anything further left
+# was written by that peer and is handled deliberately in rate_limit.client_key
+# rather than trusted here.
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
+
 # The demo UI is served from a different origin (Vite in dev, static host in
 # prod), so the browser needs explicit permission to call the API.
 from flask_cors import CORS
@@ -128,18 +137,12 @@ CORS(
 )
 
 # ===== RATE LIMITING =====
-# In-memory storage is fine for a single-instance deployment; if this ever
-# scales to multiple app instances, switch storage_uri to a shared Redis URL
-# so limits are enforced across instances instead of per-process.
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+# Defined in its own module so demo_api can decorate its routes with it without
+# importing back into this one. See rate_limit.py for how a caller is
+# identified through the proxy chain.
+from rate_limit import client_key, limiter
 
-limiter = Limiter(
-    key_func=get_remote_address,
-    app=app,
-    default_limits=["200 per hour"],
-    storage_uri="memory://",
-)
+limiter.init_app(app)
 
 # ===== GLOBAL REQUEST LOGGING =====
 from database import log_api_call
@@ -337,7 +340,7 @@ def health():
 @app.route('/upload/document', methods=['POST'])
 @app.route('/upload/pdf', methods=['POST'])  # retained: original PDF-only path
 @project_key_required
-@limiter.limit("20 per hour", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
+@limiter.limit("20 per hour", key_func=lambda: getattr(request, "project_id", None) or client_key())
 def upload_document(admin, project_id):
     """
     Ingests a document into this project's knowledge base.
@@ -914,7 +917,7 @@ def core_chat_logic(data, admin, project_id):
 
 @app.route('/chat/v2', methods=['POST'])
 @project_key_required
-@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
+@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or client_key())
 def chat_v2(admin, project_id):
     """Phase 2: Standard Reply Array output."""
     try:
@@ -938,7 +941,7 @@ def chat_v2(admin, project_id):
 
 @app.route('/chat/v3', methods=['POST'])
 @project_key_required
-@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or get_remote_address())
+@limiter.limit("30 per minute", key_func=lambda: getattr(request, "project_id", None) or client_key())
 def chat_v3(admin, project_id):
     """Phase 3: Agentic Session Message output."""
     try:
@@ -1122,7 +1125,6 @@ def disconnect_integration(admin_doc):
 # at definition time.
 from demo_api import demo_bp
 app.register_blueprint(demo_bp)
-limiter.limit("60 per minute")(demo_bp)
 
 
 if __name__ == "__main__":
