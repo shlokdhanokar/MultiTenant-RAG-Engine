@@ -10,7 +10,8 @@
     { "source": "/image/:path*",  "destination": "https://multi-tenant-rag.duckdns.org/image/:path*" },
     { "source": "/chat/:path*",   "destination": "https://multi-tenant-rag.duckdns.org/chat/:path*" },
     { "source": "/upload/:path*", "destination": "https://multi-tenant-rag.duckdns.org/upload/:path*" },
-    { "source": "/admin/:path*",  "destination": "https://multi-tenant-rag.duckdns.org/admin/:path*" }
+    { "source": "/admin/:path*",  "destination": "https://multi-tenant-rag.duckdns.org/admin/:path*" },
+    { "source": "/:path*",        "destination": "/index.html" }
   ],
 
   "headers": [
