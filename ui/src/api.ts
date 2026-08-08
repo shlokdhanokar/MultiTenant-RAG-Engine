@@ -121,6 +121,18 @@ export interface UploadResult {
   expiresAt: string;
 }
 
+export interface SourceDocument {
+  sourceFile: string;
+  fileId: string;
+  chunkCount: number;
+  totalWords: number;
+  pages: number;
+  extension: string;
+  /** Browsers can render PDFs and images in a frame; Office formats they cannot. */
+  canPreviewInline: boolean;
+  url: string;
+}
+
 export interface Stats {
   chatModel: string;
   embeddingModel: string;
@@ -163,6 +175,11 @@ export const api = {
   projectQuery: (projectId: string, query: string) =>
     req<{ x: number; y: number; query: string }>(`/projection/${projectId}/query`, postJson({ query })),
   evaluate: (projectId: string) => req<EvalResult>(`/eval/${projectId}`),
+  documents: (projectId: string) =>
+    req<{ documents: SourceDocument[] }>(`/documents/${projectId}`).then(r => r.documents),
+  /** Absolute URL for an original file — used as an iframe/download target, not fetched. */
+  documentUrl: (projectId: string, sourceFile: string) =>
+    `${BASE}/api/demo/document/${projectId}/${encodeURIComponent(sourceFile)}`,
   upload: (file: File) => {
     const fd = new FormData();
     fd.append('file', file);

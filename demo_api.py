@@ -109,6 +109,105 @@ def _signed_image_url(image_id):
     return generate_image_url(base, image_id)
 
 
+# Extensions a browser can render inline. Anything else is sent as a download,
+# since an inline Content-Disposition on an unrenderable type just produces a
+# blank frame rather than a useful preview.
+_INLINE_TYPES = {
+    ".pdf":  "application/pdf",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".txt":  "text/plain",
+}
+
+
+@demo_bp.route("/documents/<project_id>", methods=["GET"])
+def list_documents(project_id):
+    """
+    The source documents behind a knowledge base, with enough metadata for the
+    UI to decide whether it can preview each one inline.
+    """
+    _resolve_project(project_id)
+
+    # One representative chunk per source file carries the GridFS id of the
+    # original upload, which is what the preview streams back.
+    seen = {}
+    for c in db["chunks"].find(
+        {"knowledge_base_id": project_id},
+        {"_id": 0, "source_file": 1, "source_file_id": 1, "word_count": 1, "page_end": 1},
+    ):
+        name = c.get("source_file")
+        if not name:
+            continue
+        entry = seen.setdefault(name, {
+            "sourceFile": name,
+            "fileId": c.get("source_file_id"),
+            "chunkCount": 0,
+            "totalWords": 0,
+            "pages": 0,
+        })
+        entry["chunkCount"] += 1
+        entry["totalWords"] += c.get("word_count", 0)
+        entry["pages"] = max(entry["pages"], c.get("page_end") or 0)
+
+    docs = []
+    for entry in seen.values():
+        ext = os.path.splitext(entry["sourceFile"])[1].lower()
+        entry["extension"] = ext
+        entry["canPreviewInline"] = ext in _INLINE_TYPES
+        entry["url"] = f"/api/demo/document/{project_id}/{entry['sourceFile']}"
+        docs.append(entry)
+
+    docs.sort(key=lambda d: d["sourceFile"])
+    return jsonify({"projectId": project_id, "documents": docs})
+
+
+@demo_bp.route("/document/<project_id>/<path:source_file>", methods=["GET"])
+def get_document(project_id, source_file):
+    """
+    Streams the original uploaded file out of GridFS so the UI can preview the
+    exact document the answers were grounded in.
+
+    Scoped by project rather than taking a raw GridFS id: the id alone would let
+    a visitor pull any file in the bucket, including other tenants' uploads.
+    """
+    import gridfs
+    from bson import ObjectId
+    from flask import Response
+
+    _resolve_project(project_id)
+
+    chunk = db["chunks"].find_one(
+        {"knowledge_base_id": project_id, "source_file": source_file},
+        {"_id": 0, "source_file_id": 1},
+    )
+    if not chunk or not chunk.get("source_file_id"):
+        abort(404, description="No stored original for that document")
+
+    fs = gridfs.GridFS(db)
+    try:
+        stored = fs.get(ObjectId(chunk["source_file_id"]))
+    except Exception:
+        abort(404, description="Stored original is no longer available")
+
+    ext = os.path.splitext(source_file)[1].lower()
+    mime = _INLINE_TYPES.get(ext, "application/octet-stream")
+    disposition = "inline" if ext in _INLINE_TYPES else "attachment"
+
+    return Response(
+        stored.read(),
+        mimetype=mime,
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{os.path.basename(source_file)}"',
+            "Cache-Control": "private, max-age=3600",
+            # Same-origin framing only: the preview is rendered in an iframe by
+            # our own UI, and nothing else should be able to embed it.
+            "X-Frame-Options": "SAMEORIGIN",
+        },
+    )
+
+
 def _retrieve_with_trace(query, project_id):
     """
     Runs the retrieval half of the pipeline while recording what happened at

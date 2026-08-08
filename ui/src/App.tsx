@@ -10,16 +10,19 @@ import { Chunks } from './components/Chunks';
 import { VectorSpace } from './components/VectorSpace';
 import { Evaluation } from './components/Evaluation';
 import { Compare } from './components/Compare';
+import { Landing } from './components/Landing';
+import { DocumentPreview } from './components/DocumentPreview';
 
-type Tab = 'chat' | 'compare' | 'chunks' | 'vectors' | 'eval' | 'upload';
+type Tab = 'chat' | 'document' | 'compare' | 'chunks' | 'vectors' | 'eval' | 'upload';
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'chat',    label: 'Chat' },
-  { id: 'compare', label: 'RAG on/off' },
-  { id: 'chunks',  label: 'Chunks' },
-  { id: 'vectors', label: 'Vector space' },
-  { id: 'eval',    label: 'Evaluation' },
-  { id: 'upload',  label: 'Upload' },
+  { id: 'chat',     label: 'Chat' },
+  { id: 'document', label: 'Document' },
+  { id: 'compare',  label: 'RAG on/off' },
+  { id: 'chunks',   label: 'Chunks' },
+  { id: 'vectors',  label: 'Vector space' },
+  { id: 'eval',     label: 'Evaluation' },
+  { id: 'upload',   label: 'Upload' },
 ];
 
 const ICONS: Record<string, string> = { palm: '🌴', cross: '✚', file: '📄' };
@@ -30,6 +33,9 @@ export default function App() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('chat');
   const [bootError, setBootError] = useState<string | null>(null);
+  // The workspace assumes you've picked a knowledge base; the landing screen is
+  // what lets you pick one. Dismissed for the rest of the session once chosen.
+  const [entered, setEntered] = useState(false);
 
   const [turns, setTurns] = useState<Turn[]>([]);
   const [lastResult, setLastResult] = useState<ChatResult | null>(null);
@@ -72,10 +78,24 @@ export default function App() {
     );
   }
 
+  if (!entered) {
+    return (
+      <div className="app">
+        <Landing
+          tenants={tenants}
+          stats={stats}
+          onPickTenant={id => { switchTenant(id); setTab('chat'); setEntered(true); }}
+          onPreviewTenant={id => { switchTenant(id); setTab('document'); setEntered(true); }}
+          onUpload={() => { setTab('upload'); setEntered(true); }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
+        <div className="brand" style={{ cursor: 'pointer' }} onClick={() => setEntered(false)} title="Back to start">
           <span className="brand-mark">R</span>
           <div>
             <div>RAG Engine</div>
@@ -123,6 +143,10 @@ export default function App() {
               </div>
             </div>
             <Inspector result={lastResult} activeStage={activeStage} />
+          </div>
+        ) : tab === 'document' ? (
+          <div className="pane" style={{ margin: 0, borderRadius: 0 }}>
+            <DocumentPreview tenant={tenant} onClose={() => setTab('chat')} />
           </div>
         ) : (
           <div style={{ height: '100%', overflowY: 'auto', padding: 20 }}>
