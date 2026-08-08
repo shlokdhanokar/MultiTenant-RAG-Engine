@@ -3,6 +3,15 @@ import type { Stats, UploadResult } from '../api';
 import { api } from '../api';
 import { Banner, Spinner, fmtMs } from './common';
 
+/**
+ * Matches nginx's client_max_body_size on the origin. Worth checking here
+ * rather than letting the request go out: nginx rejects an oversize body the
+ * moment it reads Content-Length and closes the connection mid-upload, and the
+ * Vercel router reports that abrupt close as a generic 502 rather than passing
+ * the 413 through. Refusing locally turns that into a message that says why.
+ */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
 /** Stage names must match the backend's reported stages, in pipeline order. */
 const STAGES = [
   { key: 'parse',  label: 'Parse document structure' },
@@ -24,6 +33,14 @@ export function Upload({ stats, onIngested }: {
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function ingest(file: File) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setResult(null);
+      setError(
+        `“${file.name}” is ${(file.size / 1024 / 1024).toFixed(1)} MB — the limit is 25 MB.`,
+      );
+      return;
+    }
+
     setBusy(true);
     setError(null);
     setResult(null);

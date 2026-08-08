@@ -1,4 +1,9 @@
-const BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+// Dev server runs on :5173 and the API on :8000, so dev needs an absolute base.
+// A production build defaults to same-origin relative paths instead: both the
+// nginx deploy and the Vercel deploy serve the API under the UI's own origin,
+// and hardcoding localhost there would break the bundle. VITE_API_BASE still
+// overrides for a genuinely cross-origin deployment.
+const BASE = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? 'http://localhost:8000' : '');
 const API = `${BASE}/api/demo`;
 
 export interface Tenant {

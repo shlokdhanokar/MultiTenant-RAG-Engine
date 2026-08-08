@@ -104,9 +104,17 @@ def list_chunks(project_id):
 
 
 def _signed_image_url(image_id):
+    """
+    Host-relative, unlike the WhatsApp path which needs an absolute URL because
+    Meta's servers fetch it themselves. Here the consumer is the demo UI in a
+    browser, and that UI is served from more than one origin — nginx on the box
+    and a Vercel deployment that reverse-proxies /image/ back here. An absolute
+    APP_BASE_URL would send the browser straight to the origin host, defeating
+    the proxy. The signature covers only image_id and expiry, so dropping the
+    host does not affect verification.
+    """
     from server import generate_image_url
-    base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
-    return generate_image_url(base, image_id)
+    return generate_image_url("", image_id)
 
 
 # Extensions a browser can render inline. Anything else is sent as a download,
