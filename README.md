@@ -10,11 +10,11 @@
 [![Providers](https://img.shields.io/badge/LLM-Groq_%7C_OpenAI_%7C_Gemini-F55036?style=for-the-badge&logo=meta&logoColor=white)](#-hybrid-retrieval-grounded-generation)
 [![Integrations](https://img.shields.io/badge/Integrations-Ready-8A2BE2?style=for-the-badge&logo=webhooks&logoColor=white)](#-app-integration-ecosystem)
 
-[![Live Demo](https://img.shields.io/badge/▶_Live_Demo-multi--tenant--rag.duckdns.org-success?style=for-the-badge)](https://multi-tenant-rag.duckdns.org)
+[![Live Demo](https://img.shields.io/badge/▶_Live_Demo-multi--tenant--rag--engine.vercel.app-success?style=for-the-badge)](https://multi-tenant-rag-engine.vercel.app)
 
 A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a range of external tools and APIs via native LLM function calling.
 
-[Live Demo](https://multi-tenant-rag.duckdns.org) • [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
+[Live Demo](https://multi-tenant-rag-engine.vercel.app) • [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
 
 
 

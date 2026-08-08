@@ -7,11 +7,13 @@ API has to exist first.
 Everything below has been verified locally: the image builds, the container
 boots under Gunicorn, and a grounded chat returns through it in ~1.2s.
 
-> **This document covers the Render + Vercel route.** The live demo at
-> <https://multi-tenant-rag.duckdns.org> runs a different one — a single Oracle
-> Cloud Always Free VM serving the API and UI from one nginx origin, with TLS
-> terminated on the host. That path is free, has no cold starts, and is
-> documented in [terraform/README.md](terraform/README.md). Prefer it unless you
+> **This document covers the Render + Vercel route.** The live demo runs a
+> different one — an Oracle Cloud Always Free VM serving the API and UI from one
+> nginx origin at <https://multi-tenant-rag.duckdns.org>, with the public entry
+> point at <https://multi-tenant-rag-engine.vercel.app> reverse-proxying to it.
+> That path is free and has no cold starts; the VM is documented in
+> [terraform/README.md](terraform/README.md) and the proxy in
+> [§ 3](#3-putting-vercel-in-front-of-a-self-hosted-origin). Prefer it unless you
 > specifically want managed hosting.
 
 ---
@@ -102,6 +104,58 @@ changing it later requires a rebuild, not just a restart.
 
 Optionally set `CORS_ORIGINS` on the API to the UI's origin; it defaults to `*`,
 which is fine for a public demo but wider than it needs to be.
+
+---
+
+## 3. Putting Vercel in front of a self-hosted origin
+
+This is what the live demo does, and it is a different shape from §2: instead of
+compiling the origin's URL into the bundle, Vercel serves the bundle *and*
+reverse-proxies the API paths back to the origin. The browser only ever talks to
+`*.vercel.app`.
+
+Two problems it solves at once. The origin's hostname is a DuckDNS name, and
+network filters such as FortiGuard block dynamic-DNS domains wholesale — the
+site fails to load on exactly the corporate and campus networks it gets demoed
+on. And an `http` origin behind an `https` page is refused as mixed content.
+Moving name resolution and TLS termination to Vercel's edge removes both.
+
+`ui/vercel.json` holds the whole configuration:
+
+```json
+{
+  "rewrites": [
+    { "source": "/api/:path*",   "destination": "https://your-origin.example.org/api/:path*" },
+    { "source": "/health",       "destination": "https://your-origin.example.org/health" },
+    { "source": "/image/:path*", "destination": "https://your-origin.example.org/image/:path*" }
+  ]
+}
+```
+
+```bash
+cd ui && npx vercel deploy --prod
+```
+
+Points worth knowing before you copy it:
+
+- **Leave `VITE_API_BASE` unset.** A production build already falls back to
+  same-origin relative paths, which is what makes the rewrites apply.
+- **Use a hostname, not the origin's raw IP.** nginx matches on `server_name`,
+  so the bare IP 404s every path, and the TLS certificate is issued for the name
+  — `https` to an IP fails validation.
+- **`APP_BASE_URL` stays the origin's own URL.** The demo API's image links are
+  host-relative so they ride the proxy; only the WhatsApp payload signs absolute
+  URLs, because Meta's servers fetch those directly.
+- **New projects have Vercel Authentication on.** Every URL 302s to an SSO login
+  until you turn it off: `npx vercel project protection disable --sso`.
+- **There is no 4.5 MB request limit on rewrites to an external destination.**
+  That cap belongs to Vercel Functions, which a static site with rewrites never
+  invokes; uploads up to nginx's `client_max_body_size` (25 MB here) pass
+  through. What Vercel *does* impose is a 120s proxied-request timeout.
+- **An oversize upload surfaces as a bare 502**, not a 413: nginx rejects on
+  `Content-Length` and closes mid-upload, and the router reports the dropped
+  upstream connection rather than the status. The UI checks file size before
+  sending so visitors get a real message.
 
 ---
 
