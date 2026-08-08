@@ -59,29 +59,49 @@ ssh -i ~/.ssh/id_rsa ubuntu@<public-ip-from-terraform-output>
 ### 5. Run Deployment Script
 
 ```bash
-# Download script
 curl -O https://raw.githubusercontent.com/shlokdhanokar/MultiTenant-RAG-Engine/main/terraform/deploy.sh
 chmod +x deploy.sh
 ./deploy.sh
 ```
 
-When prompted, edit `.env` with:
+That installs Python 3.11 and Node, builds the UI bundle, and leaves nginx
+serving the SPA on port 80 with the API paths proxied to gunicorn. When
+prompted, edit `.env` with:
+
 - `MONGODB_URI` — Your MongoDB Atlas connection string
 - `GEMINI_API_KEY` — From [aistudio.google.com](https://aistudio.google.com)
-- `APP_BASE_URL` — Your public IP or domain
 
-### 6. Get SSL Certificate (Optional)
+`APP_BASE_URL` is written for you and kept in step with whatever the box is
+reachable as.
+
+### 6. HTTPS and a hostname (optional)
+
+Oracle hands out an *ephemeral* public IP that can change across a stop/start,
+which breaks both DNS and any certificate bound to it. Pass a domain and the
+script handles the whole chain — dynamic DNS, certificate, redirect, renewal:
 
 ```bash
-ssh -i ~/.ssh/id_rsa ubuntu@<public-ip>
-sudo certbot --nginx -d your-domain.com
+DOMAIN=your-name.duckdns.org \
+CERTBOT_EMAIL=you@example.com \
+DUCKDNS_TOKEN=<token from duckdns.org> \
+./deploy.sh
 ```
+
+The DuckDNS token is written to `/etc/duckdns.token` (mode 600) and refreshed
+by a cron entry every five minutes; certificates renew through the
+`certbot.timer` the package installs. Any other DNS provider works too — point
+an A record at the instance and omit `DUCKDNS_TOKEN`.
+
+> Dynamic-DNS domains are blocked wholesale by some corporate and campus
+> network filters, so a `*.duckdns.org` name can be unreachable on exactly the
+> networks you demo on. [DEPLOY.md](../DEPLOY.md#3-putting-vercel-in-front-of-a-self-hosted-origin)
+> covers putting Vercel in front of this box to sidestep that.
 
 ### 7. Test
 
 ```bash
-curl http://<public-ip>/health
-# Should return: {"status":"ok"}
+curl http://<public-ip>/health      # {"status":"ok"}
+curl http://<public-ip>/            # the UI
 ```
 
 ## Cleanup
