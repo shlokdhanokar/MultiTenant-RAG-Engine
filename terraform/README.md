@@ -4,9 +4,15 @@ Fully automated Terraform + Bash deployment to Oracle Cloud Always Free tier.
 
 ## Files
 
-- **`main.tf`** — Terraform infrastructure code (VCN, subnet, instance)
-- **`terraform.tfvars`** — Your credentials (FILL THIS IN)
-- **`deploy.sh`** — Runs on instance to install RAG engine
+- **`main.tf`** — the whole stack: VCN, subnet, internet gateway, route table,
+  security list, and one compute instance
+- **`terraform.tfvars`** — your credentials (FILL THIS IN). Gitignored, along
+  with `*.tfstate*` — Terraform writes the values of sensitive variables into
+  state in plaintext
+- **`deploy.sh`** — runs on the instance and installs everything: service,
+  nginx, UI bundle, TLS, dynamic DNS
+- **`retry-apply.ps1`** — retries `terraform apply` on "Out of host capacity".
+  Only useful if you switch the shape to `VM.Standard.A1.Flex` (see Cost below)
 
 ## Prerequisites
 
@@ -111,12 +117,29 @@ terraform destroy
 # Type "yes" to confirm
 ```
 
-## Cost
+## Cost and shape
 
-**✅ 100% FREE** under Oracle Always Free tier:
-- 2x Ampere A1 compute instances (4 cores, 24GB RAM)
-- No cold starts, always-on
-- Keep account active (login every 30 days)
+**100% free** under Oracle's Always Free tier, with no cold starts. Keep the
+account active by logging in every 30 days.
+
+`main.tf` provisions **`VM.Standard.E2.1.Micro`** — x86, 1 OCPU, 1 GB RAM.
+
+Always Free also covers `VM.Standard.A1.Flex` (Ampere ARM, up to 4 OCPU and
+24 GB across two instances), which is vastly better hardware. It is also
+perpetually capacity-starved: `terraform apply` fails with **"Out of host
+capacity"** in most regions, indefinitely, and no amount of retrying is
+guaranteed to land one. E2.1.Micro provisions immediately, every time, which is
+why it is the default here.
+
+To try A1 anyway, change `shape` in **both** places — the instance *and* the
+`oci_core_images` data source. Filtering images by A1.Flex returns aarch64
+builds; leaving the data source on E2 hands an x86 image to an ARM instance,
+which simply will not boot. A1 also takes a `shape_config` block for OCPU and
+memory, which the fixed E2 shape does not. Then run `retry-apply.ps1`.
+
+1 GB is tight, and `deploy.sh` compensates: 4 GB of swap (`pip install`, OCR and
+the Vite build each exceed 1 GB on their own), `vm.swappiness=10` so it does not
+thrash, and two Gunicorn workers recycled every ~200 requests.
 
 ## Troubleshooting
 
@@ -137,6 +160,27 @@ sudo journalctl -u rag-engine -n 50
 terraform init -upgrade
 terraform plan
 ```
+
+**"Out of host capacity" on apply?** You are on an A1 shape. See
+[Cost and shape](#cost-and-shape).
+
+**Reachable on port 22 but not 80/443?** Oracle's Ubuntu images ship iptables
+REJECT rules that block those ports even when the VCN security list allows
+them — opening the security list alone is not enough. This is the single most
+common cause, and `deploy.sh` handles it; if you deployed by hand:
+
+```bash
+sudo iptables -L INPUT -n --line-numbers        # find the REJECT line number
+sudo iptables -I INPUT <n> -m state --state NEW -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT <n> -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+The rules must go **before** the catch-all REJECT — iptables matches top-down
+and stops at the first hit, so inserting after it silently does nothing.
+
+**Site broke after a reboot?** The public IP is ephemeral and may have changed.
+Check `/var/log/duckdns.log`, or re-run `/usr/local/bin/duckdns-update.sh`.
 
 ---
 

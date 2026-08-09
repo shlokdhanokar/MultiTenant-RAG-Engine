@@ -14,7 +14,7 @@
 
 A professional-grade, scalable RAG pipeline engineered to handle multiple distinct knowledge bases simultaneously. Built for precision, it features a **"Physical-First"** image mapping strategy to guarantee pixel-perfect alignment between retrieved text and its associated media. Beyond basic RAG, this engine serves as a dynamic AI hub capable of interfacing with a range of external tools and APIs via native LLM function calling.
 
-[Live Demo](https://multi-tenant-rag-engine.vercel.app) • [Explore Features](#-core-innovations) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-architecture) • [Getting Started](#-quick-start)
+[Live Demo](https://multi-tenant-rag-engine.vercel.app) • [Explore Features](#-core-innovations) • [The Workspace](#-the-demo-workspace) • [Integration Ecosystem](#-app-integration-ecosystem) • [View Architecture](#-system-architecture) • [Getting Started](#-quick-start) • [Deployment](#-deployment)
 
 
 
@@ -49,6 +49,28 @@ One dispatcher routes each upload to a format-specific parser, all normalizing t
 | Images | Tesseract OCR | Single OCR'd block |
 
 Scanned PDFs are detected automatically (near-zero extractable text per page) and routed through OCR rather than silently ingesting as an empty knowledge base.
+
+---
+
+## 🖥️ The Demo Workspace
+
+[**multi-tenant-rag-engine.vercel.app**](https://multi-tenant-rag-engine.vercel.app) — no key, no signup.
+
+RAG systems are usually judged on the answer alone, which is exactly the part that reveals nothing about whether retrieval worked. The workspace in `ui/` shows the intermediate state instead:
+
+| View | What it exposes |
+|---|---|
+| **Chat** | The answer, alongside every retrieved candidate with its vector score, keyword score and blended rank — and which four were actually sent to the model |
+| **Document** | The original PDF the answer was grounded in, streamed from GridFS, so citations can be checked against the source |
+| **RAG on/off** | The same question answered with and without retrieval, side by side — the clearest demonstration of what grounding is for |
+| **Chunks** | How a document was split, the heading hierarchy that drove the split, and which images anchored where |
+| **Vector space** | A 2-D projection of the tenant's embeddings, with the query plotted into the same space |
+| **Evaluation** | Hit@1 / Hit@3 / MRR for vector-only vs. hybrid retrieval, run live against the stored eval set |
+| **Upload** | Your own document becomes a temporary tenant, queryable immediately, expiring after 6 hours |
+
+**Run demo** in the toolbar does the whole thing in one click: selects the flagship tenant, asks one of its sample questions, and runs the pipeline with the inspector filling in beside it.
+
+The demo API (`demo_api.py`) is deliberately unauthenticated — requiring a key to look at a demo defeats the point. Safety comes from scope instead: the routes only ever touch projects explicitly flagged `isDemo`, every route carries a rate limit priced to what it costs to serve, and visitor uploads land in ephemeral projects that expire.
 
 ---
 
@@ -137,6 +159,25 @@ python server.py
 ```
 > The server starts locally on `http://localhost:8000`. For production, run it under Gunicorn (see `Dockerfile`) instead of the Flask dev server.
 
+### 4. Launch the UI (optional)
+```bash
+cd ui && npm install && npm run dev     # http://localhost:5173
+```
+Seed the demo knowledge bases first with `python scripts/seed_demo.py`, or the workspace opens with nothing to query.
+
+---
+
+## 🌐 Deployment
+
+Three topologies are documented in [DEPLOY.md](DEPLOY.md); the live demo runs the third:
+
+```
+visitor ──▶ Vercel (static UI + rewrites) ──▶ nginx ──▶ gunicorn ──▶ MongoDB Atlas
+             *.vercel.app, TLS               Oracle Always Free VM     + Gemini
+```
+
+Vercel serves the compiled bundle and reverse-proxies the API paths to the origin, so the browser only ever talks to one origin — no CORS, no mixed content, and no dependence on the origin's hostname resolving on the visitor's network. The origin is a single Oracle Cloud Always Free instance provisioned by [`terraform/`](terraform/), with `deploy.sh` installing the service, nginx, TLS and dynamic DNS end to end.
+
 ---
 
 ## 🔌 API Reference
@@ -190,6 +231,23 @@ Serves images stored in MongoDB GridFS via a short-lived HMAC-signed URL. WhatsA
 
 Per-project token usage and estimated spend, aggregated from stored chat history. Optional `?project_id=<id>` to scope to one project.
 
+### 🔓 7. Public Demo API
+
+`GET|POST /api/demo/*` — no key required, scoped to projects flagged `isDemo`.
+
+| Route | Purpose |
+|---|---|
+| `GET /stats` · `GET /tenants` | Models in use, and the demo knowledge bases |
+| `POST /chat` | Answer plus the full retrieval trace: candidates, scores, stage timings, token cost |
+| `POST /compare` | The same question with and without retrieval |
+| `GET /chunks/<project_id>` | Chunk boundaries, headings, anchored images |
+| `GET /documents/<project_id>` · `GET /document/<project_id>/<file>` | Source-document list, and the original file streamed from GridFS |
+| `GET /projection/<project_id>` · `POST /projection/<project_id>/query` | 2-D embedding projection, and a query plotted into it |
+| `GET /eval/<project_id>` | Hit@1 / Hit@3 / MRR, vector-only vs. hybrid |
+| `POST /upload` | Ingest a visitor document into an ephemeral tenant |
+
+Document access is scoped by project rather than by GridFS id: an id alone would let a visitor pull any file in the bucket, including another tenant's upload.
+
 ---
 
 ## 🧪 Retrieval Evaluation
@@ -208,7 +266,9 @@ Add a new eval set by copying `eval/eval_set_tourism.json` and pointing `knowled
 ## ⚙️ Production Notes
 
 - **Run under Gunicorn**, not the Flask dev server — see `Dockerfile`.
-- **Rate limits**: 5/hr on tenant registration, 30/min per project key on chat, 20/hr on uploads. Limiter state is in-memory; switch `storage_uri` to Redis if you run more than one instance.
+- **Rate limits** are priced per endpoint: 5/hr on tenant registration, 30/min per project key on chat, 20/hr on uploads, and a separate per-route set on the public demo API (3/hr on `/api/demo/upload`, 10/min on `/api/demo/chat`, and so on). Counters live in MongoDB by default — with in-process storage each Gunicorn worker keeps its own, so every limit is silently multiplied by the worker count. Override with `RATELIMIT_STORAGE_URI`.
+- **Set `CORS_ORIGINS`** on any public deployment. It defaults to `*`, which lets any site spend your provider quota from its own visitors' browsers — and spreads those calls across enough addresses to stay under the per-caller limits.
+- **Behind a proxy, `ProxyFix` matters.** Without it Flask sees the proxy's address as the client for every request and the rate limits collapse into one bucket shared by everyone. See [SECURITY_IMPLEMENTATION.md](SECURITY_IMPLEMENTATION.md#rate-limiting-and-caller-identity).
 - **Atlas index**: the `vector_index` on `chunks` must declare `embedding` as a `vector` field *and* `knowledge_base_id` as a `filter` field, or tenant pre-filtering will not work. `numDimensions` must match `GEMINI_EMBEDDING_DIMENSIONS`:
   ```json
   {
