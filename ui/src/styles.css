@@ -202,6 +202,18 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   background: var(--accent); border-color: var(--accent); color: #04080b; font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) { background: #4ae0f5; border-color: #4ae0f5; }
+/* The one control that needs to be found without reading anything else. The
+   halo idles rather than flashing, and stops once the button is unavailable so
+   it never advertises something that will not respond. */
+.btn-demo { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.btn-demo:not(:disabled) { animation: demo-halo 2.6s ease-in-out infinite; }
+@keyframes demo-halo {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.42); }
+  50%      { box-shadow: 0 0 0 5px rgba(34, 211, 238, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn-demo:not(:disabled) { animation: none; box-shadow: 0 0 0 3px var(--accent-glow); }
+}
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
@@ -264,6 +276,8 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   text-align: left;
 }
 .chip:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-glow); }
+/* Dashed, to read as "add one" rather than as another existing tenant. */
+.chip-add { border-style: dashed; color: var(--accent); border-color: var(--accent-dim); }
 
 /* ---------- Metrics ---------- */
 
@@ -347,6 +361,22 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .tenant.active .tenant-icon { background: var(--accent-glow); border-color: var(--accent-dim); }
 .tenant-name { font-size: 13px; font-weight: 500; }
 .tenant-meta { font-size: 11px; color: var(--text-faint); font-family: var(--mono); margin-top: 1px; }
+
+/* The "bring your own document" entry. Dashed and accent-tinted so it reads as
+   an action in the list rather than as one more knowledge base already in it. */
+.tenant-add {
+  border-style: dashed;
+  border-color: var(--accent-dim);
+  background: var(--accent-glow);
+}
+.tenant-add:hover { border-color: var(--accent); background: rgba(34, 211, 238, 0.1); }
+.tenant-add .tenant-name { color: var(--accent); }
+.tenant-add .tenant-icon {
+  background: var(--accent-glow);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  font-size: 17px;
+}
 
 /* ---------- Upload ---------- */
 

@@ -11,12 +11,18 @@ export interface Turn {
   pending?: boolean;
 }
 
-export function Chat({ tenant, turns, setTurns, onResult, onActiveStage }: {
+/** A question to ask on the caller's behalf. The nonce is what distinguishes
+ *  "run it again with the same question" from a re-render. */
+export interface AutoSend { query: string; nonce: number }
+
+export function Chat({ tenant, turns, setTurns, onResult, onActiveStage, autoSend, onBusy }: {
   tenant: Tenant | null;
   turns: Turn[];
   setTurns: React.Dispatch<React.SetStateAction<Turn[]>>;
   onResult: (r: ChatResult) => void;
   onActiveStage?: (stage: string | null) => void;
+  autoSend?: AutoSend | null;
+  onBusy?: (busy: boolean) => void;
 }) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -25,6 +31,8 @@ export function Chat({ tenant, turns, setTurns, onResult, onActiveStage }: {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [turns]);
+
+  useEffect(() => { onBusy?.(busy); }, [busy]);
 
   async function send(text: string) {
     const q = text.trim();
@@ -66,6 +74,17 @@ export function Chat({ tenant, turns, setTurns, onResult, onActiveStage }: {
       setBusy(false);
     }
   }
+
+  // "Run demo" asks a question from outside this component. It arrives in the
+  // same commit as the tenant switch that precedes it, so the effect waits for
+  // a tenant rather than assuming one — and the nonce is tracked so a later
+  // tenant switch cannot replay the last demo question.
+  const lastAuto = useRef(0);
+  useEffect(() => {
+    if (!autoSend || !tenant || autoSend.nonce === lastAuto.current) return;
+    lastAuto.current = autoSend.nonce;
+    send(autoSend.query);
+  }, [autoSend, tenant]);
 
   const samples = tenant?.demoSampleQuestions ?? [];
 

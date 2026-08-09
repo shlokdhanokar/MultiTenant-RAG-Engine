@@ -3,14 +3,13 @@ import './styles.css';
 import type { ChatResult, Stats, Tenant } from './api';
 import { api } from './api';
 import { Banner, Spinner } from './components/common';
-import { Chat, type Turn } from './components/Chat';
+import { Chat, type AutoSend, type Turn } from './components/Chat';
 import { Inspector } from './components/Inspector';
 import { Upload } from './components/Upload';
 import { Chunks } from './components/Chunks';
 import { VectorSpace } from './components/VectorSpace';
 import { Evaluation } from './components/Evaluation';
 import { Compare } from './components/Compare';
-import { Landing } from './components/Landing';
 import { DocumentPreview } from './components/DocumentPreview';
 
 type Tab = 'chat' | 'document' | 'compare' | 'chunks' | 'vectors' | 'eval' | 'upload';
@@ -33,13 +32,12 @@ export default function App() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('chat');
   const [bootError, setBootError] = useState<string | null>(null);
-  // The workspace assumes you've picked a knowledge base; the landing screen is
-  // what lets you pick one. Dismissed for the rest of the session once chosen.
-  const [entered, setEntered] = useState(false);
 
   const [turns, setTurns] = useState<Turn[]>([]);
   const [lastResult, setLastResult] = useState<ChatResult | null>(null);
   const [activeStage, setActiveStage] = useState<string | null>(null);
+  const [autoSend, setAutoSend] = useState<AutoSend | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
 
   async function loadTenants(selectId?: string) {
     const list = await api.tenants();
@@ -54,6 +52,10 @@ export default function App() {
 
   const tenant = tenants.find(t => t.projectId === tenantId) ?? null;
 
+  // The curated tenants, in seed order. Visitor uploads are excluded: they are
+  // temporary and expire, so a demo must never depend on one being there.
+  const demoTenants = tenants.filter(t => !t.isEphemeral);
+
   // Each knowledge base is an isolated tenant — carrying a conversation across a
   // switch would misrepresent that boundary.
   function switchTenant(id: string) {
@@ -61,6 +63,31 @@ export default function App() {
     setTurns([]);
     setLastResult(null);
   }
+
+  /**
+   * One click to a finished answer, for someone who has thirty seconds and no
+   * intention of reading the UI first.
+   *
+   * The tenant is the first curated one rather than a hardcoded projectId —
+   * that is the flagship demo either way, and it survives the demo data being
+   * reseeded under different ids. The question is drawn at random from that
+   * tenant's own sample set so a second click demonstrates something new
+   * instead of replaying the first.
+   */
+  function runDemo() {
+    const target = demoTenants[0];
+    const questions = target?.demoSampleQuestions ?? [];
+    if (!target || !questions.length) return;
+
+    switchTenant(target.projectId);
+    setTab('chat');
+    setAutoSend({
+      query: questions[Math.floor(Math.random() * questions.length)],
+      nonce: Date.now(),
+    });
+  }
+
+  const canRunDemo = !chatBusy && demoTenants.some(t => t.demoSampleQuestions?.length);
 
   if (bootError) {
     return (
@@ -78,24 +105,10 @@ export default function App() {
     );
   }
 
-  if (!entered) {
-    return (
-      <div className="app">
-        <Landing
-          tenants={tenants}
-          stats={stats}
-          onPickTenant={id => { switchTenant(id); setTab('chat'); setEntered(true); }}
-          onPreviewTenant={id => { switchTenant(id); setTab('document'); setEntered(true); }}
-          onUpload={() => { setTab('upload'); setEntered(true); }}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand" style={{ cursor: 'pointer' }} onClick={() => setEntered(false)} title="Back to start">
+        <div className="brand">
           <span className="brand-mark">R</span>
           <div>
             <div>RAG Engine</div>
@@ -113,6 +126,15 @@ export default function App() {
 
         <div className="topbar-spacer" />
 
+        <button
+          className="btn btn-primary btn-sm btn-demo"
+          onClick={runDemo}
+          disabled={!canRunDemo}
+          title="Pick the demo knowledge base, ask it a question, and run the full pipeline"
+        >
+          {chatBusy ? <Spinner /> : '▶'} Run demo
+        </button>
+
         {stats && (
           <>
             <span className="pill mono" title="Generation model">{stats.chatModel}</span>
@@ -129,8 +151,13 @@ export default function App() {
           <div className="split">
             <div className="pane">
               <div className="pane-head"><span className="pane-title">Knowledge bases</span></div>
-              <div className="pane-body pad" style={{ flex: '0 0 auto', maxHeight: 232 }}>
-                <TenantList tenants={tenants} activeId={tenantId} onSelect={switchTenant} />
+              <div className="pane-body pad" style={{ flex: '0 0 auto', maxHeight: 268 }}>
+                <TenantList
+                  tenants={tenants}
+                  activeId={tenantId}
+                  onSelect={switchTenant}
+                  onAdd={() => setTab('upload')}
+                />
               </div>
               <div style={{ borderTop: '1px solid var(--border)', flex: 1, minHeight: 0, display: 'flex' }}>
                 <Chat
@@ -139,6 +166,8 @@ export default function App() {
                   setTurns={setTurns}
                   onResult={setLastResult}
                   onActiveStage={setActiveStage}
+                  autoSend={autoSend}
+                  onBusy={setChatBusy}
                 />
               </div>
             </div>
@@ -152,7 +181,12 @@ export default function App() {
           <div style={{ height: '100%', overflowY: 'auto', padding: 20 }}>
             {tab !== 'upload' && (
               <div style={{ maxWidth: 940, margin: '0 auto 18px' }}>
-                <TenantStrip tenants={tenants} activeId={tenantId} onSelect={switchTenant} />
+                <TenantStrip
+                  tenants={tenants}
+                  activeId={tenantId}
+                  onSelect={switchTenant}
+                  onAdd={() => setTab('upload')}
+                />
               </div>
             )}
             {tab === 'compare' && <Compare tenant={tenant} />}
@@ -179,8 +213,8 @@ export default function App() {
 }
 
 /** Multi-tenant switcher — the same engine, isolated knowledge bases. */
-function TenantList({ tenants, activeId, onSelect }: {
-  tenants: Tenant[]; activeId: string | null; onSelect: (id: string) => void;
+function TenantList({ tenants, activeId, onSelect, onAdd }: {
+  tenants: Tenant[]; activeId: string | null; onSelect: (id: string) => void; onAdd: () => void;
 }) {
   if (!tenants.length) return <div style={{ color: 'var(--text-faint)' }}><Spinner /> loading…</div>;
   return (
@@ -201,12 +235,23 @@ function TenantList({ tenants, activeId, onSelect }: {
           </span>
         </button>
       ))}
+
+      {/* Sits with the knowledge bases rather than only behind the Upload tab:
+          bringing your own document is the thing most visitors actually want
+          to try, and a tab label does not say that. */}
+      <button className="tenant tenant-add" onClick={onAdd}>
+        <span className="tenant-icon">＋</span>
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <div className="tenant-name">Add your own knowledge base</div>
+          <div className="tenant-meta">upload a document · queryable at once</div>
+        </span>
+      </button>
     </div>
   );
 }
 
-function TenantStrip({ tenants, activeId, onSelect }: {
-  tenants: Tenant[]; activeId: string | null; onSelect: (id: string) => void;
+function TenantStrip({ tenants, activeId, onSelect, onAdd }: {
+  tenants: Tenant[]; activeId: string | null; onSelect: (id: string) => void; onAdd: () => void;
 }) {
   return (
     <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
@@ -220,6 +265,7 @@ function TenantStrip({ tenants, activeId, onSelect }: {
           {ICONS[t.demoIcon ?? 'file'] ?? '📄'} {t.projectName}
         </button>
       ))}
+      <button className="chip chip-add" onClick={onAdd}>＋ Add your own</button>
     </div>
   );
 }
