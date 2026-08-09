@@ -12,8 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Every root module the app imports. Listed explicitly rather than `COPY . .`
+# so the image cannot pick up local .env files or scratch scripts — but that
+# means a new module has to be added here, or the image fails at import.
 COPY server.py demo_api.py database.py config.py token_logger.py \
-     seed_registry.py llm_client.py logging_config.py ./
+     seed_registry.py llm_client.py logging_config.py rate_limit.py ./
 COPY phase1_upload/ ./phase1_upload/
 COPY phase2_retrieval/ ./phase2_retrieval/
 COPY phase3_formatting/ ./phase3_formatting/

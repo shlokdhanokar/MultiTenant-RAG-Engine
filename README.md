@@ -88,43 +88,32 @@ Tools are built dynamically per tenant from whichever integrations that project 
 
 ## 🏗️ System Architecture
 
+**Ingestion** — one dispatcher, five parsers, a single normalized layout shape downstream:
+
 ```mermaid
-graph TD
-    subgraph Client [Client Interface]
-        A[Document Upload]
-        B[User Chat Query]
-    end
+graph LR
+    UP["Upload<br/>PDF · DOCX · PPTX<br/>XLSX · image"] --> DISP{"Format<br/>dispatcher"}
+    DISP -->|"scanned PDF<br/>reroutes to OCR"| PARSE["PyMuPDF · python-docx<br/>python-pptx · openpyxl<br/>Tesseract OCR"]
+    PARSE --> CHUNK["Semantic chunker<br/>grouped by heading"]
+    CHUNK --> ANCHOR["Physical Y-coordinate<br/>image anchoring"]
+    ANCHOR --> EMBED["Gemini embeddings<br/>1536d"]
+    EMBED --> MDB[("MongoDB Atlas<br/>chunks + vectors")]
+    ANCHOR -->|"binaries"| GFS[("GridFS<br/>images + originals")]
+```
 
-    subgraph Ingestion Pipeline
-        C[PDF Parser]
-        D[Semantic Chunker]
-        E[Physical Y-Coord Mapper]
-    end
+**Query** — retrieval is tenant-scoped inside the search, and generation only ever sees retrieved context:
 
-    subgraph Database Layer
-        F[(MongoDB Chunks + Embeddings)]
-        G[(GridFS Media)]
-    end
-
-    subgraph Retrieval & Action Pipeline
-        H{Intent Router}
-        I[Atlas Vector Search]
-        K[LLM: Gemini / Groq / OpenAI]
-        L[Third-Party App Integrations]
-    end
-
-    A --> C
-    C -- "Extract Text & Images" --> D
-    D -- "Group by H1/H2" --> E
-    E -- "Anchor Images" --> F
-    E -- "Store Binary" --> G
-
-    B --> H
-    H -- "Knowledge Query" --> I
-    H -- "External Task" --> L
-    I -- "Fetch Context" --> K
-    K -- "Generate Grounded Response" --> Client
-    L -- "Execute Action" --> Client
+```mermaid
+graph LR
+    Q["Question<br/>+ tenant"] --> ROUTE{"Intent<br/>router"}
+    ROUTE -->|"knowledge"| VS["Atlas vectorSearch<br/>tenant pre-filter"]
+    ROUTE -->|"external task"| TOOLS["Function calling<br/>Calendar · Shopify<br/>Slack · Calendly"]
+    MDB[("MongoDB Atlas")] --> VS
+    VS --> RR["Hybrid re-rank<br/>semantic + lexical"]
+    RR -->|"top 4 chunks"| GEN["Gemini / Groq / OpenAI<br/>grounded prompt"]
+    GFS[("GridFS")] -.->|"HMAC-signed URLs"| GEN
+    GEN --> OUT["Answer + citations<br/>or a refusal"]
+    TOOLS --> OUT
 ```
 
 ---
